@@ -1,6 +1,13 @@
 # 🚀️ Project Guide 🚀️
 
-## 1.Dataset Collection
+## Dataset
+
+The dataset used in the experiment is mainly the [WHU-OMVS Dataset](https://gpcv.whu.edu.cn/data/WHU_OMVS_dataset/WHU_dataset.htm), which includes four compressed packages: train.zip (67.1G), test.zip (22.1G), predict.zip (45.7G), and readme.zip (1.72K). Meanwhile, we provide [download\_utils.py](https://www.doubao.com/chat/utils/download_utils.py) to automatically download the files and save them in the data folder. The startup command is as follows:
+
+```bash
+# You can set your own save_dir pat
+python utils/download_utils.py --save_dir ./data
+```
 
 To finish the feedforward 3D reconstruction task, we use DJI UAV to collect image with UAV's view to build the FF3R model. And before use UAV, the camera and imu should be calibrated, which depends on [imu_utils](https://github.com/gaowenliang/imu_utils.git) and [kalibr](https://github.com/ethz-asl/kalibr.git). Becanse of Ubuntu22.04 version, we use docker to install kalibr and imu_utils tools to avoid system conflicts.
 
