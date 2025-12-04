@@ -4,3 +4,11 @@
 [submodule "clones/imu_utils"]
 	path = clones/imu_utils
 	url = https://github.com/gaowenliang/imu_utils.git
+	
+	
+[submodule "clones/VGGT-X"]
+	path = clones/VGGT-X
+	url = https://github.com/Linketic/VGGT-X.git
+[submodule "clones/vggt"]
+	path = clones/vggt
+	url = https://github.com/facebookresearch/vggt.git
