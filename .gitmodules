@@ -15,3 +15,6 @@
 [submodule "clones/gaussian-splatting"]
 	path = clones/gaussian-splatting
 	url = https://github.com/graphdeco-inria/gaussian-splatting.git
+[submodule "clones/LightGlue"]
+	path = clones/LightGlue
+	url = https://github.com/cvg/LightGlue.git
