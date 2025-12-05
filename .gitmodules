@@ -12,3 +12,6 @@
 [submodule "clones/vggt"]
 	path = clones/vggt
 	url = https://github.com/facebookresearch/vggt.git
+[submodule "clones/gaussian-splatting"]
+	path = clones/gaussian-splatting
+	url = https://github.com/graphdeco-inria/gaussian-splatting.git

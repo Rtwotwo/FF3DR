@@ -3,3 +3,9 @@ kalibr_imu_data/
 
 # ignore data folder
 data/
+
+# ignore papers folder
+papers/
+
+# ignore logs folder
+logs/
