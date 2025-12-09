@@ -18,3 +18,9 @@
 [submodule "clones/LightGlue"]
 	path = clones/LightGlue
 	url = https://github.com/cvg/LightGlue.git
+[submodule "clones/map-anything"]
+	path = clones/map-anything
+	url = https://github.com/facebookresearch/map-anything
+[submodule "clones/Depth-Anything-3"]
+	path = clones/Depth-Anything-3
+	url = https://github.com/ByteDance-Seed/Depth-Anything-3.git
