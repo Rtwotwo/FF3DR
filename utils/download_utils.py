@@ -13,7 +13,6 @@ import hashlib
 from tqdm import tqdm
 
 
-# 待下载的压缩数据包文件链接
 urls = ["https://gpcv.whu.edu.cn/data/WHU_OMVS_dataset/train.zip",
     "https://gpcv.whu.edu.cn/data/WHU_OMVS_dataset/test.zip",
     "https://gpcv.whu.edu.cn/data/WHU_OMVS_dataset/predict.zip",
@@ -101,7 +100,6 @@ def main():
                 if not os.path.exists(file_path):
                     os.remove(file_path)
         else:
-            # 下载文件
             if not download_file(url, file_path):
                 print(f"[ ERROR ] Failed to download {filename}. Exiting.")
                 continue

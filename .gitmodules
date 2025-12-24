@@ -4,23 +4,14 @@
 [submodule "clones/imu_utils"]
 	path = clones/imu_utils
 	url = https://github.com/gaowenliang/imu_utils.git
+
 	
-	
-[submodule "clones/VGGT-X"]
-	path = clones/VGGT-X
-	url = https://github.com/Linketic/VGGT-X.git
-[submodule "clones/vggt"]
-	path = clones/vggt
-	url = https://github.com/facebookresearch/vggt.git
-[submodule "clones/gaussian-splatting"]
-	path = clones/gaussian-splatting
-	url = https://github.com/graphdeco-inria/gaussian-splatting.git
-[submodule "clones/LightGlue"]
-	path = clones/LightGlue
-	url = https://github.com/cvg/LightGlue.git
 [submodule "clones/map-anything"]
 	path = clones/map-anything
 	url = https://github.com/facebookresearch/map-anything
 [submodule "clones/Depth-Anything-3"]
 	path = clones/Depth-Anything-3
 	url = https://github.com/ByteDance-Seed/Depth-Anything-3.git
+[submodule "clones/sam-3d-body"]
+	path = clones/sam-3d-body
+	url = https://github.com/facebookresearch/sam-3d-body.git
