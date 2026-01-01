@@ -7,6 +7,7 @@ Homepage: https://github.com/Rtwotwo/FF3DR.git
 """
 import os
 import numpy as np
+import pyexr
 
 
 def read_camera_info(camera_info_path:str):
@@ -58,7 +59,14 @@ def read_image_info(image_info_path:str):
     return IMAGES_INFO
 
 
-def read_exr_file(exr_file_path:str):
+def read_exr_file(exr_file_path:str)->np.ndarray:
     """exr_file读取深度图信息,主要包括每个视角的深度图
     将深度图的exr文件转成后续用于计算的格式,便于操作"""
-    
+    exr_data = pyexr.open(exr_file_path)
+    channels = exr_data.channels()
+    # 获取深度信息
+    depth = exr_data.get()  
+    if depth.ndim == 3: depth = depth[:, :, 0]  
+    return depth.astype(np.float32)
+
+

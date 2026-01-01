@@ -20,7 +20,7 @@ urls = ["https://gpcv.whu.edu.cn/data/WHU_OMVS_dataset/train.zip",
 
 
 def calculate_md5(filepath):
-    """计算文件 MD5 值"""
+    """计算文件MD5值"""
     hash_md5 = hashlib.md5()
     with open(filepath, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
@@ -30,7 +30,7 @@ def calculate_md5(filepath):
 
 def download_file(url, save_path, timeout=30):
     """下载单个文件，支持断点续传和超时控制"""
-    print(f"[ INFO ] Downloading {url} -> {save_path}")
+    print(f"[INFO] Downloading {url} -> {save_path}")
     try:
         headers = {}
         file_size = 0
@@ -45,7 +45,7 @@ def download_file(url, save_path, timeout=30):
                 content_range = r.headers['Content-Range']
                 start_byte = int(content_range.split('-')[0].split()[1])
                 if start_byte != file_size:
-                    print(f"[ ERROR ] Range mismatch: expected {start_byte}, got {file_size}")
+                    print(f"[ERROR] Range mismatch: expected {start_byte}, got {file_size}")
                     os.remove(save_path)
                     return False
             total_size = int(r.headers.get('content-length', 0)) + file_size
@@ -55,10 +55,10 @@ def download_file(url, save_path, timeout=30):
                         if chunk:
                             f.write(chunk)
                             pbar.update(len(chunk))
-        print(f"[ INFO ] Download completed: {save_path}")
+        print(f"[INFO] Download completed: {save_path}")
         return True
     except Exception as e:
-        print(f"[ ERROR ] Failed to download {url}: {e}")
+        print(f"[ERROR] Failed to download {url}: {e}")
         if os.path.exists(save_path):
             os.remove(save_path)
         return False
@@ -72,13 +72,13 @@ def unzip_file(zip_path, extract_to):
             check=True,
             capture_output=True,
             text=True)
-        print(f"[ INFO ] Unzipped {zip_path} successfully.")
+        print(f"[INFO] Unzipped {zip_path} successfully.")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"[ ERROR ] Failed to unzip {zip_path}: {e.stderr}")
+        print(f"[ERROR] Failed to unzip {zip_path}: {e.stderr}")
         return False
     except FileNotFoundError:
-        print("[ ERROR ] unzip command not found. Please install unzip.")
+        print("[ERROR] unzip command not found. Please install unzip.")
         return False
 
 
@@ -92,21 +92,21 @@ def main():
         file_path = os.path.join(args.save_dir, filename)
         # 检查是否已存在且完整
         if os.path.exists(file_path):
-            print(f"[ INFO ] {filename} already exists. Skipping download.")
+            print(f"[INFO] {filename} already exists. Skipping download.")
             if unzip_file(file_path, args.save_dir):
                 continue
             else:
-                print(f"[ WARNING ] Existing {filename} is corrupted. Re-downloading...")
+                print(f"[WARNING] Existing {filename} is corrupted. Re-downloading...")
                 if not os.path.exists(file_path):
                     os.remove(file_path)
         else:
             if not download_file(url, file_path):
-                print(f"[ ERROR ] Failed to download {filename}. Exiting.")
+                print(f"[ERROR] Failed to download {filename}. Exiting.")
                 continue
         if not unzip_file(file_path, args.save_dir):
-            print(f"[ ERROR ] Failed to extract {filename}.")
+            print(f"[ERROR] Failed to extract {filename}.")
             continue
-    print("[ INFO ] All files downloaded and extracted successfully!")
+    print("[INFO] All files downloaded and extracted successfully!")
 
 
 if __name__ == "__main__":

@@ -15,3 +15,6 @@
 [submodule "clones/sam-3d-body"]
 	path = clones/sam-3d-body
 	url = https://github.com/facebookresearch/sam-3d-body.git
+[submodule "clones/Ada-MVS"]
+	path = clones/Ada-MVS
+	url = https://github.com/gpcv-liujin/Ada-MVS.git
