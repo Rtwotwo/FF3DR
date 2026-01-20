@@ -6,7 +6,8 @@ Todo: 读取WHU-OMVS数据集的相机参数,深度图以及掩码等
 Homepage: https://github.com/Rtwotwo/FF3DR.git
 """
 import os
-import pyexr
+import re
+import sys
 import numpy as np
 from typing import Dict, List,Tuple, Optional
 
@@ -152,5 +153,79 @@ def read_view_pair_text(pair_path:str, view_num:int):
     return metas
 
 
-if __name__ == "__main__":
-    pass
+def write_red_cam(file, cam, ref_path):
+    """将相机的外参extrinsic和内参intrinsic以
+    一种自定义文本格式称为RED格式写入文件"""
+    f = open(file, "w")
+    f.write('extrinsic: XrightYdown, [Rcw|tcw]\n')
+    for i in range(0, 4):
+        for j in range(0, 4):
+            f.write(str(cam[0][i][j]) + ' ')
+        f.write('\n')
+    f.write('\n')
+    f.write('intrinsic\n')
+    for i in range(0, 3):
+        for j in range(0, 3):
+            f.write(str(cam[1][i][j]) + ' ')
+        f.write('\n')
+    f.write('\n' + str(cam[1][3][0]) + ' ' + str(cam[1][3][1]) + 
+            ' ' + str(cam[1][3][2]) + ' ' + str(cam[1][3][3]) + '\n')
+    f.write('\n')
+    f.write(str(ref_path) + '\n')
+    f.close()
+
+
+def read_pfm(filename):
+    """读取PFM格式的Portable FloatMap格式的深度图或视差图"""
+    file = open(filename, 'rb')
+    color = None
+    width = None
+    height = None
+    scale = None
+    endian = None
+    # 获得深度图的头文件信息
+    header = file.readline().decode('utf-8').rstrip()
+    if header == 'PF':
+        color = True
+    elif header == 'Pf':
+        color = False
+    else: raise Exception('Not a PFM file.')
+    dim_match = re.match(r'^(\d+)\s(\d+)\s$', file.readline().decode('utf-8'))
+    if dim_match:
+        width, height = map(int, dim_match.groups())
+    else: raise Exception('Malformed PFM header.')
+    scale = float(file.readline().rstrip())
+    if scale < 0:  # little-endian
+        endian = '<'
+        scale = -scale
+    else: endian = '>'  # big-endian
+    data = np.fromfile(file, endian + 'f')
+    shape = (height, width, 3) if color else (height, width)
+    data = np.reshape(data, shape)
+    data = np.flipud(data)
+    file.close()
+    return data, scale
+
+
+def save_pfm(filename, image, scale=1):
+    """将numpy浮点数组保存为PFM格式,与read_pfm配对使用"""
+    file = open(filename, "wb")
+    color = None
+    image = np.flipud(image)
+    if image.dtype.name != 'float32':
+        raise Exception('Image dtype must be float32.')
+    if len(image.shape) == 3 and image.shape[2] == 3:  # color image
+        color = True
+    elif len(image.shape) == 2 or len(image.shape) == 3 and image.shape[2] == 1:  # greyscale
+        color = False
+    else:
+        raise Exception('Image must have H x W x 3, H x W x 1 or H x W dimensions.')
+    file.write('PF\n'.encode('utf-8') if color else 'Pf\n'.encode('utf-8'))
+    file.write('{} {}\n'.format(image.shape[1], image.shape[0]).encode('utf-8'))
+    endian = image.dtype.byteorder
+
+    if endian == '<' or endian == '=' and sys.byteorder == 'little':
+        scale = -scale
+    file.write(('%f\n' % scale).encode('utf-8'))
+    image.tofile(file)
+    file.close()

@@ -6,6 +6,9 @@
 	url = https://github.com/gaowenliang/imu_utils.git
 
 	
+[submodule "clones/Ada-MVS"]
+	path = clones/Ada-MVS
+	url = https://github.com/gpcv-liujin/Ada-MVS.git
 [submodule "clones/map-anything"]
 	path = clones/map-anything
 	url = https://github.com/facebookresearch/map-anything
@@ -15,6 +18,6 @@
 [submodule "clones/sam-3d-body"]
 	path = clones/sam-3d-body
 	url = https://github.com/facebookresearch/sam-3d-body.git
-[submodule "clones/Ada-MVS"]
-	path = clones/Ada-MVS
-	url = https://github.com/gpcv-liujin/Ada-MVS.git
+[submodule "clones/VGGT-Long"]
+	path = clones/VGGT-Long
+	url = https://github.com/DengKaiCQ/VGGT-Long.git
