@@ -12,3 +12,6 @@ clones/
 
 # ignore dataset folder
 dataset/
+
+# ignore weights
+weights/
