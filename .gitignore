@@ -1,6 +1,3 @@
-# ignore kalibr_imu_data folder
-kalibr_imu_data/
-
 # ignore data folder
 data/
 
@@ -9,3 +6,9 @@ papers/
 
 # ignore logs folder
 logs/
+
+# ignore clones folder
+clones/
+
+# ignore dataset folder
+dataset/
