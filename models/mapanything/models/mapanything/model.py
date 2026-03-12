@@ -15,14 +15,14 @@ import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin
 
-from mapanything.utils.geometry import (
+from models.mapanything.utils.geometry import (
     apply_log_to_norm,
     convert_ray_dirs_depth_along_ray_pose_trans_quats_to_pointmap,
     normalize_depth_using_non_zero_pixels,
     normalize_pose_translations,
     transform_pose_using_quats_and_trans_2_to_1,
 )
-from mapanything.utils.inference import (
+from models.mapanything.utils.inference import (
     postprocess_model_outputs_for_inference,
     preprocess_input_views_for_inference,
     validate_input_views_for_inference,

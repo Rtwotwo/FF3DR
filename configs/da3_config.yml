@@ -1,0 +1,5 @@
+Weights:
+  DA3: './weights/depthanything/model.safetensors'
+  DA3_CONFIG: './weights/depthanything/config.json'
+  SALAD: './weights/depthanything/dino_salad.ckpt'
+

@@ -10,10 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Union, List, Dict, Any
 
-from vggt.layers import PatchEmbed
-from vggt.layers.block import Block
-from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+from models.vggt.layers import PatchEmbed
+from models.vggt.layers.block import Block
+from models.vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
+from models.vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
 logger = logging.getLogger(__name__)
 

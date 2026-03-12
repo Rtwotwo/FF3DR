@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 import numpy as np
 import torch
 
-from mapanything.utils.geometry import (
+from models.mapanything.utils.geometry import (
     depth_edge,
     get_rays_in_camera_frame,
     normals_edge,
@@ -22,7 +22,7 @@ from mapanything.utils.geometry import (
     recover_pinhole_intrinsics_from_ray_directions,
     rotation_matrix_to_quaternion,
 )
-from mapanything.utils.image import rgb
+from models.mapanything.utils.image import rgb
 
 # Hard constraints - exactly what users can provide
 ALLOWED_VIEW_KEYS = {

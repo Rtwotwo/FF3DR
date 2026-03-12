@@ -13,7 +13,7 @@ from typing import Callable, Dict, Type, Union
 import torch
 import torch.nn as nn
 
-from mapanything.utils.geometry import (
+from models.mapanything.utils.geometry import (
     apply_log_to_norm,
     convert_ray_dirs_depth_along_ray_pose_trans_quats_to_pointmap,
     normalize_depth_using_non_zero_pixels,

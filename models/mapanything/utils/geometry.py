@@ -17,8 +17,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from mapanything.utils.misc import invalid_to_zeros
-from mapanything.utils.warnings import no_warnings
+from models.mapanything.utils.misc import invalid_to_zeros
+from models.mapanything.utils.warnings import no_warnings
 
 
 def depthmap_to_camera_frame(depthmap, intrinsics):

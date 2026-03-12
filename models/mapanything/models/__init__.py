@@ -15,7 +15,7 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
 # Core models that are always available
-from mapanything.models.mapanything import (
+from models.mapanything.models.mapanything import (
     MapAnything,
     MapAnythingAblations,
     ModularDUSt3R,

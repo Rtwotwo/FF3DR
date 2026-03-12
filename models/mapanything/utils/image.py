@@ -32,8 +32,8 @@ try:
 except ImportError:
     heif_support_enabled = False
 
-from mapanything.utils.cropping import crop_resize_if_necessary
-from mapanything.utils.geometry import recover_pinhole_intrinsics_from_ray_directions
+from models.mapanything.utils.cropping import crop_resize_if_necessary
+from models.mapanything.utils.geometry import recover_pinhole_intrinsics_from_ray_directions
 from uniception.models.encoders.image_normalizations import IMAGE_NORMALIZATION_DICT
 
 # Fixed resolution mappings with precomputed aspect ratios as keys

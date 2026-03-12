@@ -20,7 +20,7 @@ except AttributeError:
     lanczos = PIL.Image.LANCZOS
     bicubic = PIL.Image.BICUBIC
 
-from mapanything.utils.geometry import (
+from models.mapanything.utils.geometry import (
     colmap_to_opencv_intrinsics,
     opencv_to_colmap_intrinsics,
 )
