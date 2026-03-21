@@ -1,0 +1,855 @@
+import argparse
+import copy
+import json
+import logging
+import os
+import numpy as np
+import torch
+from safetensors.torch import load_file
+from running.utils.config_utils import load_config
+from models.vggt.utils.load_fn import load_and_preprocess_images
+from models.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from models.pi3.utils.basic import load_images_as_tensor_pi_long
+from models.mapanything.utils.image import load_images
+
+from loop_utils.alignment_torch import apply_sim3_direct_torch, depth_to_point_cloud_optimized_torch
+from loop_utils.sim3utils import (
+    accumulate_sim3_transforms,
+    compute_alignment_error,
+    merge_ply_files,
+    precompute_scale_chunks_with_depth,
+    save_confident_pointcloud_batch,
+    weighted_align_point_maps,)
+
+from models.depthanything3.api import DepthAnything3
+from models.mapanything.models.mapanything.model import MapAnything
+from uniception.models.utils.transformer_blocks import Mlp
+from models.pi3.models.pi3 import Pi3
+from models.vggt.models.vggt import VGGT
+logger = logging.getLogger(__name__)
+
+
+class FF3DR:
+    """Streaming reconstruction for synchronized multi-camera rigs.
+    Design goals:
+    1) keep frame-major multi-camera ordering;
+    2) run robust chunk alignment across time;
+    3) support multiple back-end models with one unified output format.
+    """
+    def __init__(self, args):
+        self.args = args
+        self.config = load_config(args.config_path)
+        self.area_path = args.area_path
+        self.model_name = args.model_name
+        self.output_path = args.output_path
+        if args.device in ["cuda", "cpu"]:
+            self.device = args.device
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        cfg_chunk_size = int(self.config["Model"]["chunk_size"])
+        cfg_overlap = int(self.config["Model"]["overlap"])
+        self.chunk_size = args.chunk_size if args.chunk_size > 0 else cfg_chunk_size
+        # Use config overlap directly when CLI does not override it.
+        self.overlap = args.overlap if args.overlap >= 0 else cfg_overlap
+        if self.overlap >= self.chunk_size:
+            raise ValueError(f"[SETTING ERROR] overlap={self.overlap} must be smaller than chunk_size={self.chunk_size}")
+        if torch.cuda.is_available():
+            self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        else:
+            self.dtype = torch.float32
+        self.predictions_pcd_dir = os.path.join(self.output_path, "tmp_predictions_pcd")
+        self.predictions_loop_dir = os.path.join(self.output_path, "tmp_predictions_loop")
+        self.predictions_aligned_dir = os.path.join(self.output_path, "tmp_predictions_aligned")
+        self.predictions_unaligned_dir = os.path.join(self.output_path, "tmp_predictions_unaligned")
+        for p in [self.output_path, self.predictions_pcd_dir, self.predictions_loop_dir, self.predictions_aligned_dir, self.predictions_unaligned_dir]:
+            os.makedirs(p, exist_ok=True)
+        self.camera_dirs, self.image_paths = self._build_camera_index(self.area_path)
+        self.num_cameras_to_use = args.num_cameras_to_use
+        if self.num_cameras_to_use > 0:
+            if self.num_cameras_to_use > len(self.camera_dirs):
+                raise ValueError(
+                    f"[SETTING ERROR] num_cameras_to_use={self.num_cameras_to_use} exceeds available cameras={len(self.camera_dirs)}"
+                )
+            self.camera_dirs = self.camera_dirs[: self.num_cameras_to_use]
+            self.image_paths = {k: self.image_paths[k] for k in self.camera_dirs}
+        self.num_cameras = len(self.camera_dirs)
+        self.num_frames = min(len(v) for v in self.image_paths.values())
+        self.max_chunks = args.max_chunks
+        self.anchor_cam_index = args.anchor_cam_index
+        total_images = self.num_cameras * self.num_frames
+        logger.info(
+            "[INFO] Cameras=%d, synced_frames=%d, total_images=%d, chunk_size=%d, overlap=%d",
+            self.num_cameras,
+            self.num_frames,
+            total_images,
+            self.chunk_size,
+            self.overlap,
+        )
+        self.model = self._load_model()
+        self.anchor_cam_index = self._resolve_anchor_cam_index(self.anchor_cam_index)
+        logger.info("[INFO] Anchor camera index for chunk alignment: %d", self.anchor_cam_index)
+        self.da3_infer_mode = args.da3_infer_mode
+        if self.da3_infer_mode not in ["anchor_stream", "framewise_multicam", "global_chunk"]:
+            raise ValueError(
+                f"[SETTING ERROR] da3_infer_mode={self.da3_infer_mode} must be one of anchor_stream/framewise_multicam/global_chunk"
+            )
+        # Keep compatibility with existing code paths that use this boolean.
+        self.da3_use_anchor_stream = (
+            self.model_name == "depthanything3"
+            and self.num_cameras > 1
+            and self.da3_infer_mode == "anchor_stream"
+        )
+        if self.model_name == "depthanything3" and self.num_cameras > 1:
+            logger.info("[INFO] DA3 inference mode: %s", self.da3_infer_mode)
+            if self.da3_use_anchor_stream:
+                logger.info(
+                    "[INFO] DA3 multi-camera mode: using anchor camera stream only (cam=%d) for temporal consistency",
+                    self.anchor_cam_index,
+                )
+
+    def _cfg_get_weight(self, model_key, field, fallback_flat_key=None):
+        """Get weight path from either nested or DA3-style flat config.
+
+        Supported examples:
+        - nested: Weights.depthanything3.DA3
+        - flat:   Weights.DA3
+        """
+        weights = self.config.get("Weights", {})
+        if model_key in weights and isinstance(weights[model_key], dict) and field in weights[model_key]:
+            return weights[model_key][field]
+        if fallback_flat_key is not None and fallback_flat_key in weights:
+            return weights[fallback_flat_key]
+        raise KeyError(f"Missing weight config for {model_key}.{field} (fallback={fallback_flat_key})")
+
+    def _camera_sort_key(self, path):
+        name = os.path.basename(path)
+        return (0, int(name)) if name.isdigit() else (1, name)
+
+    def _build_camera_index(self, area_path):
+        if not os.path.isdir(area_path):
+            raise RuntimeError(f"[ERROR] area_path not found: {area_path}")
+        camera_dirs = [os.path.join(area_path, d) for d in os.listdir(area_path) if os.path.isdir(os.path.join(area_path, d))]
+        camera_dirs = sorted(camera_dirs, key=self._camera_sort_key)
+        if len(camera_dirs) == 0:
+            raise RuntimeError(f"[ERROR] No camera folders under: {area_path}")
+        image_paths = {}
+        for cam_dir in camera_dirs:
+            files = [
+                os.path.join(cam_dir, f)
+                for f in os.listdir(cam_dir)
+                if f.lower().endswith((".png", ".jpg", ".jpeg"))
+            ]
+            files = sorted(files)
+            if len(files) == 0:
+                logger.warning("[WARN] Empty camera folder: %s", cam_dir)
+            image_paths[cam_dir] = files
+        return camera_dirs, image_paths
+
+    def _load_model(self):
+        if self.model_name == "depthanything3":
+            da3_config_path = self._cfg_get_weight("depthanything3", "DA3_CONFIG", fallback_flat_key="DA3_CONFIG")
+            da3_weight_path = self._cfg_get_weight("depthanything3", "DA3", fallback_flat_key="DA3")
+            with open(da3_config_path, "r") as f:
+                da3_config = json.load(f)
+            model = DepthAnything3(**da3_config)
+            state_dict = load_file(da3_weight_path)
+            model.load_state_dict(state_dict, strict=False)
+        elif self.model_name == "mapanything":
+            try:
+                with open(self.config["Weights"]["mapanything"]["MAP_CONFIG"], "r") as f:
+                    map_config = json.load(f)
+                # Compat fix: newer uniception expects callable mlp_layer instead of string.
+                if isinstance(map_config, dict):
+                    info_cfg = map_config.get("info_sharing_config", {})
+                    module_args = info_cfg.get("module_args", {})
+                    if module_args.get("mlp_layer", None) == "mlp":
+                        module_args["mlp_layer"] = Mlp
+                model = MapAnything(**map_config)
+                state_dict = load_file(self.config["Weights"]["mapanything"]["MAP"])
+                model.load_state_dict(state_dict, strict=False)
+            except Exception:
+                model = MapAnything.from_pretrained(self.config["Weights"]["mapanything"]["MAP_URL"])
+        elif self.model_name == "pi3":
+            _ = self.config["Weights"]["pi3"]["PI3_CONFIG"]
+            model = Pi3()
+            state_dict = load_file(self.config["Weights"]["pi3"]["PI3"])
+            model.load_state_dict(state_dict, strict=False)
+        elif self.model_name == "vggt":
+            model = VGGT()
+            state_dict = torch.load(self.config["Weights"]["vggt"]["VGGT"], map_location=self.device)
+            if isinstance(state_dict, dict):
+                model.load_state_dict(state_dict, strict=False)
+        else:
+            raise RuntimeError("[ERROR] model_name must be one of depthanything3/mapanything/pi3/vggt")
+        model.eval().to(self.device)
+        logger.info("[INFO] Model loaded: %s", self.model_name)
+        return model
+
+    def _ensure_batch(self, arr, kind):
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        if kind in ["depth", "conf"] and arr.ndim == 2:
+            return arr[None, ...]
+        if kind == "images" and arr.ndim == 3 and arr.shape[-1] == 3:
+            return arr[None, ...]
+        if kind == "intrinsics" and arr.ndim == 2:
+            return arr[None, ...]
+        if kind == "extrinsics" and arr.ndim == 2:
+            return arr[None, ...]
+        if kind == "world_points" and arr.ndim == 3 and arr.shape[-1] == 3:
+            return arr[None, ...]
+        return arr
+
+    def _to_numpy(self, value):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        return np.asarray(value)
+
+    def _squeeze_leading_batch(self, value):
+        if value is None:
+            return None
+        value = self._to_numpy(value)
+        if value.ndim >= 1 and value.shape[0] == 1:
+            return value[0]
+        return value
+
+    def _get_prediction_arrays(self, pred):
+        if isinstance(pred, dict):
+            depth = pred.get("depth", None)
+            conf = pred.get("conf", pred.get("depth_conf", pred.get("world_points_conf", None)))
+            intrinsics = pred.get("intrinsics", pred.get("intrinsic", None))
+            extrinsics = pred.get("extrinsics", pred.get("extrinsic", None))
+            images = pred.get("processed_images", pred.get("images", None))
+            world_points = pred.get("world_points", None)
+        else:
+            depth = getattr(pred, "depth", None)
+            conf = getattr(pred, "conf", None)
+            intrinsics = getattr(pred, "intrinsics", None)
+            extrinsics = getattr(pred, "extrinsics", None)
+            images = getattr(pred, "processed_images", getattr(pred, "images", None))
+            world_points = getattr(pred, "world_points", None)
+
+        depth = self._squeeze_leading_batch(depth)
+        conf = self._squeeze_leading_batch(conf)
+        intrinsics = self._squeeze_leading_batch(intrinsics)
+        extrinsics = self._squeeze_leading_batch(extrinsics)
+        images = self._squeeze_leading_batch(images)
+        world_points = self._squeeze_leading_batch(world_points)
+
+        if depth is not None and depth.ndim == 4 and depth.shape[-1] == 1:
+            depth = np.squeeze(depth, axis=-1)
+        if conf is not None and conf.ndim == 4 and conf.shape[-1] == 1:
+            conf = np.squeeze(conf, axis=-1)
+        if extrinsics is not None:
+            if extrinsics.ndim == 2 and extrinsics.shape == (4, 4):
+                extrinsics = extrinsics[:3, :4]
+            elif extrinsics.ndim == 3 and extrinsics.shape[-2:] == (4, 4):
+                extrinsics = extrinsics[:, :3, :4]
+
+        depth = self._ensure_batch(depth, "depth")
+        conf = self._ensure_batch(conf, "conf")
+        intrinsics = self._ensure_batch(intrinsics, "intrinsics")
+        extrinsics = self._ensure_batch(extrinsics, "extrinsics")
+        images = self._ensure_batch(images, "images")
+        world_points = self._ensure_batch(world_points, "world_points")
+        return depth, conf, intrinsics, extrinsics, images, world_points
+
+    def _build_chunk_images(self, range_1, range_2=None):
+        # Keep frame-major order to ensure one frame includes all cameras.
+        frame_indices = list(range(range_1[0], range_1[1]))
+        if range_2 is not None:
+            frame_indices.extend(list(range(range_2[0], range_2[1])))
+        chunk_images = []
+        for frame_idx in frame_indices:
+            for cam_dir in self.camera_dirs:
+                chunk_images.append(self.image_paths[cam_dir][frame_idx])
+        return chunk_images
+
+    def _resolve_anchor_cam_index(self, requested_idx):
+        """Resolve anchor camera index.
+
+        If user passes a valid index, use it. Otherwise prefer camera folder named '3'
+        (typical nadir/center camera in five-view rigs), then fallback to middle index.
+        """
+        if 0 <= requested_idx < self.num_cameras:
+            return requested_idx
+        cam_names = [os.path.basename(p) for p in self.camera_dirs]
+        if "3" in cam_names:
+            return cam_names.index("3")
+        return self.num_cameras // 2
+
+    def _select_anchor_from_frame_major(self, arr, overlap_frames, from_tail):
+        """Select only anchor-camera entries from frame-major [frame0 cam0..camN-1, ...]."""
+        if arr is None:
+            return None
+        if self.da3_use_anchor_stream:
+            total_frames = arr.shape[0]
+            if overlap_frames <= 0:
+                return arr[:0]
+            use_frames = min(overlap_frames, total_frames)
+            return arr[-use_frames:] if from_tail else arr[:use_frames]
+        total = arr.shape[0]
+        total_frames = total // self.num_cameras
+        if overlap_frames <= 0:
+            return arr[:0]
+        use_frames = min(overlap_frames, total_frames)
+        start_frame = total_frames - use_frames if from_tail else 0
+        selected = []
+        for f in range(start_frame, start_frame + use_frames):
+            idx = f * self.num_cameras + self.anchor_cam_index
+            selected.append(arr[idx])
+        return np.stack(selected, axis=0) if selected else arr[:0]
+
+    def _infer_depthanything3_framewise(self, chunk_images, ref_view_strategy):
+        """Run DA3 per frame-group to enforce same-frame multi-view consistency.
+
+        Input chunk_images is frame-major; each frame contributes num_cameras images.
+        """
+        outputs = {
+            "depth": [],
+            "conf": [],
+            "intrinsics": [],
+            "extrinsics": [],
+            "processed_images": [],
+        }
+        total_frames = len(chunk_images) // self.num_cameras
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        for frame_idx in range(total_frames):
+            s = frame_idx * self.num_cameras
+            e = s + self.num_cameras
+            frame_images = chunk_images[s:e]
+            with torch.no_grad():
+                if torch.cuda.is_available():
+                    with torch.amp.autocast("cuda", dtype=self.dtype):
+                        pred = self.model.inference(frame_images, ref_view_strategy=ref_view_strategy)
+                else:
+                    pred = self.model.inference(frame_images, ref_view_strategy=ref_view_strategy)
+            outputs["depth"].append(self._to_numpy(getattr(pred, "depth", None)))
+            outputs["conf"].append(self._to_numpy(getattr(pred, "conf", None)) - 1.0)
+            outputs["intrinsics"].append(self._to_numpy(getattr(pred, "intrinsics", None)))
+            outputs["extrinsics"].append(self._to_numpy(getattr(pred, "extrinsics", None)))
+            outputs["processed_images"].append(self._to_numpy(getattr(pred, "processed_images", None)))
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return {
+            "depth": np.concatenate(outputs["depth"], axis=0),
+            "conf": np.concatenate(outputs["conf"], axis=0),
+            "intrinsics": np.concatenate(outputs["intrinsics"], axis=0),
+            "extrinsics": np.concatenate(outputs["extrinsics"], axis=0),
+            "processed_images": np.concatenate(outputs["processed_images"], axis=0),
+            "world_points": None,
+        }
+
+    def get_chunk_indices(self):
+        if self.num_frames <= self.chunk_size:
+            return [(0, self.num_frames)]
+        step = self.chunk_size - self.overlap
+        chunk_indices = []
+        for s in range(0, self.num_frames, step):
+            e = min(s + self.chunk_size, self.num_frames)
+            chunk_indices.append((s, e))
+            if e == self.num_frames:
+                break
+        return chunk_indices
+
+    def _infer_depthanything3(self, chunk_images, ref_view_strategy):
+        if self.da3_use_anchor_stream:
+            # Input chunk_images is frame-major; pick the same anchor camera for each frame.
+            chunk_images = chunk_images[self.anchor_cam_index :: self.num_cameras]
+        elif self.model_name == "depthanything3" and self.num_cameras > 1 and self.da3_infer_mode == "framewise_multicam":
+            return self._infer_depthanything3_framewise(chunk_images, ref_view_strategy)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.amp.autocast("cuda", dtype=self.dtype):
+                    pred = self.model.inference(chunk_images, ref_view_strategy=ref_view_strategy)
+            else:
+                pred = self.model.inference(chunk_images, ref_view_strategy=ref_view_strategy)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return {
+            "depth": self._to_numpy(getattr(pred, "depth", None)),
+            "conf": self._to_numpy(getattr(pred, "conf", None)) - 1.0,
+            "intrinsics": self._to_numpy(getattr(pred, "intrinsics", None)),
+            "extrinsics": self._to_numpy(getattr(pred, "extrinsics", None)),
+            "processed_images": self._to_numpy(getattr(pred, "processed_images", None)),
+            "world_points": None,
+        }
+
+    def _infer_pi3(self, chunk_images):
+        images = load_images_as_tensor_pi_long(chunk_images).to(self.device)
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.amp.autocast("cuda", dtype=self.dtype):
+                    res = self.model(images[None])
+            else:
+                res = self.model(images[None])
+        conf = torch.sigmoid(res["conf"][..., 0])
+        depth = res["local_points"][..., 2]
+        c2w = res["camera_poses"]
+        w2c = torch.linalg.inv(c2w)
+        extrinsics = w2c[..., :3, :4]
+        b, n, h, w = depth.shape
+        intrinsics = torch.zeros((b, n, 3, 3), device=depth.device, dtype=depth.dtype)
+        f = float(max(h, w))
+        intrinsics[..., 0, 0] = f
+        intrinsics[..., 1, 1] = f
+        intrinsics[..., 0, 2] = float(w) / 2.0
+        intrinsics[..., 1, 2] = float(h) / 2.0
+        intrinsics[..., 2, 2] = 1.0
+        processed = (images[None].permute(0, 1, 3, 4, 2) * 255.0).clamp(0, 255)
+        return {
+            "depth": self._to_numpy(depth),
+            "conf": self._to_numpy(conf),
+            "intrinsics": self._to_numpy(intrinsics),
+            "extrinsics": self._to_numpy(extrinsics),
+            "processed_images": self._to_numpy(processed.astype(torch.uint8) if hasattr(processed, "astype") else processed.to(torch.uint8)),
+            "world_points": self._to_numpy(res["points"]),
+        }
+
+    def _infer_vggt(self, chunk_images):
+        images = load_and_preprocess_images(chunk_images).to(self.device)
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.amp.autocast("cuda", dtype=self.dtype):
+                    pred = self.model(images)
+            else:
+                pred = self.model(images)
+        pose_enc = pred["pose_enc"]
+        extrinsics, intrinsics = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
+        depth = pred["depth"][..., 0]
+        conf = pred.get("depth_conf", pred.get("world_points_conf"))
+        processed = (images.unsqueeze(0).permute(0, 1, 3, 4, 2) * 255.0).clamp(0, 255)
+        return {
+            "depth": self._to_numpy(depth),
+            "conf": self._to_numpy(conf),
+            "intrinsics": self._to_numpy(intrinsics),
+            "extrinsics": self._to_numpy(extrinsics),
+            "processed_images": self._to_numpy(processed.to(torch.uint8)),
+            "world_points": self._to_numpy(pred.get("world_points", None)),
+        }
+
+    def _infer_mapanything(self, chunk_images):
+        views = load_images(chunk_images)
+        with torch.no_grad():
+            pred_list = self.model.infer(
+                views,
+                memory_efficient_inference=False,
+                use_amp=True,
+                amp_dtype="bf16",
+                apply_mask=True,
+                mask_edges=True,
+                apply_confidence_mask=False,
+                ignore_calibration_inputs=False,
+                ignore_depth_inputs=False,
+                ignore_pose_inputs=True,
+                ignore_depth_scale_inputs=False,
+                ignore_pose_scale_inputs=True,
+            )
+
+        def cat_tensors(key):
+            return torch.cat([p[key] for p in pred_list], dim=0)
+
+        world_points = cat_tensors("pts3d").unsqueeze(0)
+        conf = cat_tensors("conf").unsqueeze(0)
+        depth = cat_tensors("depth_z").squeeze(-1).unsqueeze(0)
+        intrinsics = cat_tensors("intrinsics").unsqueeze(0)
+        c2w = cat_tensors("camera_poses")
+        w2c = torch.linalg.inv(c2w)
+        extrinsics = w2c[:, :3, :4].unsqueeze(0)
+        images = (cat_tensors("img_no_norm") * 255.0).clamp(0, 255).to(torch.uint8).unsqueeze(0)
+        return {
+            "depth": self._to_numpy(depth),
+            "conf": self._to_numpy(conf),
+            "intrinsics": self._to_numpy(intrinsics),
+            "extrinsics": self._to_numpy(extrinsics),
+            "processed_images": self._to_numpy(images),
+            "world_points": self._to_numpy(world_points),
+        }
+
+    def inference_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False):
+        chunk_images = self._build_chunk_images(range_1, range_2)
+        ref_view_strategy = self.config["Model"]["ref_view_strategy" if not is_loop else "ref_view_strategy_loop"]
+        if self.model_name == "depthanything3":
+            predictions = self._infer_depthanything3(chunk_images, ref_view_strategy)
+        elif self.model_name == "mapanything":
+            predictions = self._infer_mapanything(chunk_images)
+        elif self.model_name == "pi3":
+            predictions = self._infer_pi3(chunk_images)
+        elif self.model_name == "vggt":
+            predictions = self._infer_vggt(chunk_images)
+        else:
+            raise RuntimeError(f"[ERROR] Unsupported model: {self.model_name}")
+        if is_loop:
+            save_dir = self.predictions_loop_dir
+            file_name = f"loop_{range_1[0]}_{range_1[1]}_{range_2[0]}_{range_2[1]}.npy" if range_2 is not None else f"loop_{range_1[0]}_{range_1[1]}.npy"
+        else:
+            if chunk_idx is None:
+                raise ValueError("chunk_idx must be provided when is_loop is False")
+            save_dir = self.predictions_unaligned_dir
+            file_name = f"chunk_{chunk_idx}.npy"
+        save_path = os.path.join(save_dir, file_name)
+        np.save(save_path, predictions, allow_pickle=True)
+        logger.info("[INFO] Saved chunk %s with %d images", file_name, len(chunk_images))
+        return predictions
+
+    def align_2pcds(self, point_map1, conf1, point_map2, conf2, chunk1_depth, chunk2_depth, chunk1_depth_conf, chunk2_depth_conf):
+        conf_threshold = min(np.median(conf1), np.median(conf2)) * 0.1
+        scale_factor = None
+        if self.config["Model"]["align_method"] == "scale+se3":
+            scale_factor, quality_score, method_used = precompute_scale_chunks_with_depth(
+                chunk1_depth,
+                chunk1_depth_conf,
+                chunk2_depth,
+                chunk2_depth_conf,
+                method=self.config["Model"]["scale_compute_method"],
+            )
+            logger.info("[INFO] Depth-scale precompute: scale=%s, quality=%s, method=%s", scale_factor, quality_score, method_used)
+        s, R, t = weighted_align_point_maps(
+            point_map1,
+            conf1,
+            point_map2,
+            conf2,
+            conf_threshold=conf_threshold,
+            config=self.config,
+            precompute_scale=scale_factor,
+        )
+        mean_error = compute_alignment_error(
+            point_map1,
+            conf1,
+            point_map2,
+            conf2,
+            conf_threshold,
+            s,
+            R,
+            t,
+        )
+        return s, R, t, float(mean_error)
+
+    def _rotation_angle_deg(self, R):
+        tr = float(np.trace(R))
+        cos_theta = np.clip((tr - 1.0) * 0.5, -1.0, 1.0)
+        return float(np.degrees(np.arccos(cos_theta)))
+
+    def _is_anchor_sim3_outlier(self, s, R, t, mean_error, prev_sim3, err_hist):
+        # Reject chunk-pair transforms that are highly likely to be mismatches.
+        if prev_sim3 is None:
+            return False
+        if len(err_hist) < 3:
+            # Warmup stage: only reject very obvious failures.
+            return mean_error > 0.9
+
+        med_err = float(np.median(err_hist))
+        err_threshold = max(0.55, 3.2 * med_err)
+        return mean_error > err_threshold
+
+    def _refine_aligned_overlap(self, prev_points, prev_conf, cur_points, cur_conf):
+        """Estimate a small seam correction that maps current overlap to previous overlap."""
+        conf_threshold = min(np.median(prev_conf), np.median(cur_conf)) * 0.1
+        refine_cfg = copy.deepcopy(self.config)
+        refine_cfg["Model"]["align_method"] = "se3"
+
+        s, R, t = weighted_align_point_maps(
+            prev_points,
+            prev_conf,
+            cur_points,
+            cur_conf,
+            conf_threshold=conf_threshold,
+            config=refine_cfg,
+            precompute_scale=None,
+        )
+        mean_error = compute_alignment_error(
+            prev_points,
+            prev_conf,
+            cur_points,
+            cur_conf,
+            conf_threshold,
+            s,
+            R,
+            t,
+        )
+        return s, R, t, float(mean_error)
+
+    def _chunk_to_point_arrays(self, pred):
+        depth, conf, intrinsics, extrinsics, images, world_points = self._get_prediction_arrays(pred)
+        if conf is None:
+            raise RuntimeError("[ERROR] Missing confidence map in prediction")
+        if world_points is None:
+            if depth is None or intrinsics is None or extrinsics is None:
+                raise RuntimeError("[ERROR] Missing depth/intrinsics/extrinsics to build world points")
+            world_points = depth_to_point_cloud_optimized_torch(depth, intrinsics, extrinsics)
+        if depth is None:
+            depth = np.linalg.norm(world_points, axis=-1)
+        if images is not None and images.dtype != np.uint8:
+            if np.max(images) <= 1.0:
+                images = (images * 255.0).clip(0, 255).astype(np.uint8)
+            else:
+                images = images.clip(0, 255).astype(np.uint8)
+        return world_points, conf, images, depth
+
+    def process_long_sequence(self):
+        """Run chunked reconstruction and align chunk coordinate systems with SIM3."""
+        if self.num_frames == 0:
+            raise RuntimeError("[ERROR] No frames found")
+        chunk_indices = self.get_chunk_indices()
+        if self.max_chunks > 0:
+            chunk_indices = chunk_indices[: self.max_chunks]
+        logger.info("[INFO] Processing %d frames in %d chunks", self.num_frames, len(chunk_indices))
+        pre_predictions = None
+        sim3_list = []
+        sim3_error_hist = []
+        prev_good_sim3 = None
+        for chunk_idx, fr in enumerate(chunk_indices):
+            logger.info("[Progress] chunk %d/%d, frame_range=%s", chunk_idx + 1, len(chunk_indices), fr)
+            cur_predictions = self.inference_single_chunk(fr, chunk_idx=chunk_idx, is_loop=False)
+            if pre_predictions is not None:
+                points1, conf1, _, depth1 = self._chunk_to_point_arrays(pre_predictions)
+                points2, conf2, _, depth2 = self._chunk_to_point_arrays(cur_predictions)
+                # Important: use only one anchor camera per frame for temporal SIM3.
+                # Mixing all view directions in overlap often makes registration unstable.
+                overlap_frames = self.overlap
+                if overlap_frames > 0:
+                    point_map1 = self._select_anchor_from_frame_major(points1, overlap_frames, from_tail=True)
+                    point_map2 = self._select_anchor_from_frame_major(points2, overlap_frames, from_tail=False)
+                    conf_map1 = self._select_anchor_from_frame_major(conf1, overlap_frames, from_tail=True)
+                    conf_map2 = self._select_anchor_from_frame_major(conf2, overlap_frames, from_tail=False)
+                    if self.config["Model"]["align_method"] == "scale+se3":
+                        depth_map1 = np.squeeze(self._select_anchor_from_frame_major(depth1, overlap_frames, from_tail=True))
+                        depth_map2 = np.squeeze(self._select_anchor_from_frame_major(depth2, overlap_frames, from_tail=False))
+                        depth_conf1 = np.squeeze(conf_map1)
+                        depth_conf2 = np.squeeze(conf_map2)
+                    else:
+                        depth_map1 = None
+                        depth_map2 = None
+                        depth_conf1 = None
+                        depth_conf2 = None
+                    s, R, t, mean_error = self.align_2pcds(
+                        point_map1,
+                        conf_map1,
+                        point_map2,
+                        conf_map2,
+                        depth_map1,
+                        depth_map2,
+                        depth_conf1,
+                        depth_conf2,
+                    )
+                    if self.da3_use_anchor_stream:
+                        if self._is_anchor_sim3_outlier(
+                            s,
+                            R,
+                            t,
+                            mean_error,
+                            prev_good_sim3,
+                            sim3_error_hist,
+                        ):
+                            if prev_good_sim3 is not None:
+                                logger.warning(
+                                    "[WARN] Outlier SIM3 at chunk %d: err=%.4f, fallback to previous stable transform",
+                                    chunk_idx,
+                                    mean_error,
+                                )
+                                s, R, t = prev_good_sim3
+                        else:
+                            prev_good_sim3 = (s, R, t)
+                        sim3_error_hist.append(mean_error)
+                    sim3_list.append((s, R, t))
+                else:
+                    sim3_list.append((1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)))
+            pre_predictions = cur_predictions
+        if len(sim3_list) > 0:
+            cumulative_sim3 = accumulate_sim3_transforms(sim3_list)
+        else:
+            cumulative_sim3 = []
+        prev_aligned_world_points = None
+        prev_aligned_confs = None
+        for chunk_idx in range(len(chunk_indices)):
+            chunk_data = np.load(os.path.join(self.predictions_unaligned_dir, f"chunk_{chunk_idx}.npy"), allow_pickle=True).item()
+            world_points, confs, colors, _ = self._chunk_to_point_arrays(chunk_data)
+            if chunk_idx > 0:
+                s, R, t = cumulative_sim3[chunk_idx - 1]
+                world_points = apply_sim3_direct_torch(world_points, s, R, t)
+                if self.da3_use_anchor_stream and self.overlap > 0 and prev_aligned_world_points is not None:
+                    overlap_n = min(self.overlap, prev_aligned_world_points.shape[0], world_points.shape[0])
+                    if overlap_n > 0:
+                        prev_overlap_pts = prev_aligned_world_points[-overlap_n:]
+                        prev_overlap_conf = prev_aligned_confs[-overlap_n:]
+                        cur_overlap_pts = world_points[:overlap_n]
+                        cur_overlap_conf = confs[:overlap_n]
+                        try:
+                            rs, rR, rt, rerr = self._refine_aligned_overlap(
+                                prev_overlap_pts,
+                                prev_overlap_conf,
+                                cur_overlap_pts,
+                                cur_overlap_conf,
+                            )
+                            rot_deg = self._rotation_angle_deg(rR)
+                            # Keep refinement conservative to avoid over-correction.
+                            if rerr < 0.45 and abs(rs - 1.0) < 0.03 and rot_deg < 3.0 and np.linalg.norm(rt) < 1.5:
+                                world_points = apply_sim3_direct_torch(world_points, rs, rR, rt)
+                                logger.info(
+                                    "[INFO] Seam refine chunk %d: err=%.4f, rot=%.2fdeg, |t|=%.3f",
+                                    chunk_idx,
+                                    rerr,
+                                    rot_deg,
+                                    float(np.linalg.norm(rt)),
+                                )
+                        except Exception as e:
+                            logger.warning("[WARN] Seam refine failed at chunk %d: %s", chunk_idx, str(e))
+            aligned_chunk = {"world_points": world_points, "conf": confs, "images": colors}
+            np.save(os.path.join(self.predictions_aligned_dir, f"chunk_{chunk_idx}.npy"), aligned_chunk, allow_pickle=True)
+            conf_threshold = np.mean(confs) * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"]
+            ply_path = os.path.join(self.predictions_pcd_dir, f"{chunk_idx}_pcd.ply")
+            save_confident_pointcloud_batch(
+                points=world_points,
+                colors=colors,
+                confs=confs,
+                output_path=ply_path,
+                conf_threshold=conf_threshold,
+                sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
+            )
+            logger.info("[INFO] Saved aligned PLY: %s", ply_path)
+            prev_aligned_world_points = world_points
+            prev_aligned_confs = confs
+        merged_path = os.path.join(self.output_path, "reconstruction_merged.ply")
+        merge_ply_files(self.predictions_pcd_dir, merged_path)
+        logger.info("[INFO] Reconstruction done: %s", merged_path)
+        if bool(self.config.get("Model", {}).get("delete_temp_files", False)):
+            self._cleanup_temp_npy_files()
+
+    def run(self):
+        logger.info("[INFO] Running FF3DR on %s", self.area_path)
+        self.process_long_sequence()
+
+    def _cleanup_temp_npy_files(self):
+        target_dirs = [
+            self.predictions_unaligned_dir,
+            self.predictions_aligned_dir,
+            self.predictions_loop_dir,
+        ]
+        removed_files = 0
+        removed_bytes = 0
+        for d in target_dirs:
+            if not os.path.isdir(d):
+                continue
+            for name in os.listdir(d):
+                if not name.endswith(".npy"):
+                    continue
+                fpath = os.path.join(d, name)
+                try:
+                    removed_bytes += os.path.getsize(fpath)
+                    os.remove(fpath)
+                    removed_files += 1
+                except Exception as e:
+                    logger.warning("[WARN] Failed to delete temp file %s: %s", fpath, str(e))
+        logger.info(
+            "[INFO] Temp cleanup done: removed %d npy files (%.2f MB)",
+            removed_files,
+            removed_bytes / (1024.0 * 1024.0),
+        )
+
+
+def _load_run_arg_defaults(yaml_path):
+    if yaml_path is None or not os.path.isfile(yaml_path):
+        return {}
+    cfg = load_config(yaml_path)
+    if not isinstance(cfg, dict):
+        return {}
+    # Support both flat and nested style under RunArgs.
+    defaults = cfg.get("RunArgs", cfg)
+    return defaults if isinstance(defaults, dict) else {}
+
+
+def _build_parser(run_defaults):
+    parser = argparse.ArgumentParser(description="FF3DR")
+    parser.add_argument(
+        "--run_args_yaml",
+        type=str,
+        default="./configs/ff3dr_args.yaml",
+        help="YAML file with default startup arguments",
+    )
+    parser.add_argument(
+        "--area_path",
+        type=str,
+        default=run_defaults.get("area_path", "./dataset/WHU-OMVS/train/area1/images"),
+        help="Area images folder, containing camera subfolders",
+    )
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        default=run_defaults.get("config_path", "./configs/base_config.yaml"),
+        help="Config file path",
+    )
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        default=run_defaults.get("output_path", "./exp"),
+        help="Output directory",
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=run_defaults.get("model_name", "depthanything3"),
+        help="depthanything3/mapanything/pi3/vggt",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=int(run_defaults.get("chunk_size", -1)),
+        help="Chunk size in frames, <=0 to use config",
+    )
+    parser.add_argument(
+        "--overlap",
+        type=int,
+        default=int(run_defaults.get("overlap", -1)),
+        help="Chunk overlap in frames, -1 to use config",
+    )
+    parser.add_argument(
+        "--max_chunks",
+        type=int,
+        default=int(run_defaults.get("max_chunks", -1)),
+        help="Run only first N chunks for quick debug, -1 means all",
+    )
+    parser.add_argument(
+        "--anchor_cam_index",
+        type=int,
+        default=int(run_defaults.get("anchor_cam_index", -1)),
+        help="Anchor camera index for chunk alignment, -1 means auto",
+    )
+    parser.add_argument(
+        "--num_cameras_to_use",
+        type=int,
+        default=int(run_defaults.get("num_cameras_to_use", -1)),
+        help="How many sorted camera folders to use, -1 means all",
+    )
+    parser.add_argument(
+        "--da3_infer_mode",
+        type=str,
+        default=run_defaults.get("da3_infer_mode", "framewise_multicam"),
+        help="DA3 mode: framewise_multicam/anchor_stream/global_chunk",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=run_defaults.get("device", "cpu"),
+        help="Fallback device string when cuda is unavailable",
+    )
+    return parser
+
+
+if __name__ == "__main__":
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--run_args_yaml", type=str, default="./configs/ff3dr_args.yaml")
+    pre_args, _ = pre_parser.parse_known_args()
+    defaults = _load_run_arg_defaults(pre_args.run_args_yaml)
+
+    parser = _build_parser(defaults)
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    logger.info("[INFO] Startup defaults yaml: %s", args.run_args_yaml)
+    ff3dr = FF3DR(args)
+    ff3dr.run()

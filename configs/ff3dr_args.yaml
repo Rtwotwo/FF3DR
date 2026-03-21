@@ -1,0 +1,12 @@
+RunArgs:
+  area_path: ./dataset/WHU-OMVS/train/area1/images
+  config_path: ./configs/base_config.yaml
+  output_path: ./exp/ff3dr_area1_cfg120_anchorfix_camera5
+  model_name: depthanything3
+  chunk_size: -1
+  overlap: -1
+  max_chunks: -1
+  num_cameras_to_use: 5
+  da3_infer_mode: framewise_multicam
+  anchor_cam_index: 2
+  device: cuda

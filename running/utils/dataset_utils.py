@@ -1,10 +1,3 @@
-"""
-Author: Redal
-Date: 2026-03-10
-Description: WHU-OMVS dataset loader for multi-view stereo tasks
-            
-Homepage: https://github.com/Rtwotwo/FF3DR.git
-"""
 import os
 import torch
 from torch.utils.data import Dataset
