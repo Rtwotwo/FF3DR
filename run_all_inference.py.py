@@ -89,6 +89,7 @@ class FF3DR:
         self.anchor_cam_index = self._resolve_anchor_cam_index(self.anchor_cam_index)
         logger.info("[INFO] Anchor camera index for chunk alignment: %d", self.anchor_cam_index)
         self.da3_infer_mode = args.da3_infer_mode
+        self.da3_stable_fusion = bool(args.da3_stable_fusion)
         if self.da3_infer_mode not in ["anchor_stream", "framewise_multicam", "global_chunk"]:
             raise ValueError(
                 f"[SETTING ERROR] da3_infer_mode={self.da3_infer_mode} must be one of anchor_stream/framewise_multicam/global_chunk"
@@ -101,6 +102,7 @@ class FF3DR:
         )
         if self.model_name == "depthanything3" and self.num_cameras > 1:
             logger.info("[INFO] DA3 inference mode: %s", self.da3_infer_mode)
+            logger.info("[INFO] DA3 stable fusion: %s", self.da3_stable_fusion)
             if self.da3_use_anchor_stream:
                 logger.info(
                     "[INFO] DA3 multi-camera mode: using anchor camera stream only (cam=%d) for temporal consistency",
@@ -285,6 +287,13 @@ class FF3DR:
         """Select only anchor-camera entries from frame-major [frame0 cam0..camN-1, ...]."""
         if arr is None:
             return None
+        if arr.shape[0] % self.num_cameras != 0:
+            # Fallback chunks may provide one sample per frame (anchor stream).
+            total_frames = arr.shape[0]
+            if overlap_frames <= 0:
+                return arr[:0]
+            use_frames = min(overlap_frames, total_frames)
+            return arr[-use_frames:] if from_tail else arr[:use_frames]
         if self.da3_use_anchor_stream:
             total_frames = arr.shape[0]
             if overlap_frames <= 0:
@@ -314,8 +323,41 @@ class FF3DR:
             "intrinsics": [],
             "extrinsics": [],
             "processed_images": [],
+            "world_points": [],
         }
         total_frames = len(chunk_images) // self.num_cameras
+        cum_s = 1.0
+        cum_R = np.eye(3, dtype=np.float32)
+        cum_t = np.zeros(3, dtype=np.float32)
+        prev_cam_centers = None
+        frame_align_err_hist = []
+        accepted_transforms = 0
+
+        def cam_centers_from_w2c(extrinsics):
+            # extrinsics: [N, 3, 4] (w2c)
+            R = extrinsics[:, :3, :3]
+            t = extrinsics[:, :3, 3]
+            Rt = np.transpose(R, (0, 2, 1))
+            c = -np.einsum("nij,nj->ni", Rt, t)
+            return c.astype(np.float32)
+
+        def estimate_se3_from_points(src, dst):
+            # Solve dst ~= R * src + t (after per-frame scale normalization)
+            mu_src = src.mean(axis=0)
+            mu_dst = dst.mean(axis=0)
+            X = src - mu_src
+            Y = dst - mu_dst
+            cov = (Y.T @ X) / max(src.shape[0], 1)
+            U, D, Vt = np.linalg.svd(cov)
+            S = np.eye(3, dtype=np.float32)
+            if np.linalg.det(U @ Vt) < 0:
+                S[2, 2] = -1.0
+            R = (U @ S @ Vt).astype(np.float32)
+            t = (mu_dst - (R @ mu_src)).astype(np.float32)
+            pred = (R @ src.T).T + t[None, :]
+            rmse = float(np.sqrt(np.mean(np.sum((pred - dst) ** 2, axis=1))))
+            return R, t, rmse
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         for frame_idx in range(total_frames):
@@ -328,20 +370,111 @@ class FF3DR:
                         pred = self.model.inference(frame_images, ref_view_strategy=ref_view_strategy)
                 else:
                     pred = self.model.inference(frame_images, ref_view_strategy=ref_view_strategy)
-            outputs["depth"].append(self._to_numpy(getattr(pred, "depth", None)))
-            outputs["conf"].append(self._to_numpy(getattr(pred, "conf", None)) - 1.0)
-            outputs["intrinsics"].append(self._to_numpy(getattr(pred, "intrinsics", None)))
-            outputs["extrinsics"].append(self._to_numpy(getattr(pred, "extrinsics", None)))
-            outputs["processed_images"].append(self._to_numpy(getattr(pred, "processed_images", None)))
+
+            frame_depth = self._to_numpy(getattr(pred, "depth", None))
+            frame_conf = self._to_numpy(getattr(pred, "conf", None)) - 1.0
+            frame_intrinsics = self._to_numpy(getattr(pred, "intrinsics", None))
+            frame_extrinsics = self._to_numpy(getattr(pred, "extrinsics", None))
+            frame_images_np = self._to_numpy(getattr(pred, "processed_images", None))
+
+            frame_points = depth_to_point_cloud_optimized_torch(
+                frame_depth,
+                frame_intrinsics,
+                frame_extrinsics,
+            )
+
+            frame_cam_centers = cam_centers_from_w2c(frame_extrinsics)
+            if self.num_cameras >= 2:
+                rig_scale = float(np.linalg.norm(frame_cam_centers[1] - frame_cam_centers[0]))
+            else:
+                rig_scale = 1.0
+            if not np.isfinite(rig_scale) or rig_scale < 1e-6:
+                rig_scale = 1.0
+            # Normalize per-frame scale before temporal stitching.
+            frame_cam_centers = frame_cam_centers / rig_scale
+            frame_points = frame_points / rig_scale
+
+            # Align each frame's multi-camera prediction to the first frame using anchor camera.
+            if frame_idx > 0:
+                try:
+                    R_ij, t_ij, align_err = estimate_se3_from_points(
+                        frame_cam_centers,
+                        prev_cam_centers,
+                    )
+
+                    if len(frame_align_err_hist) < 3:
+                        is_bad = align_err > 0.25
+                    else:
+                        err_thr = max(0.2, 3.0 * float(np.median(frame_align_err_hist)))
+                        is_bad = align_err > err_thr
+
+                    if not is_bad:
+                        cum_R = R_ij @ cum_R
+                        cum_t = (R_ij @ cum_t) + t_ij
+                        accepted_transforms += 1
+                    else:
+                        logger.warning(
+                            "[WARN] Framewise stitch outlier at local frame %d: rmse=%.4f, keep previous cumulative transform",
+                            frame_idx,
+                            align_err,
+                        )
+                    frame_align_err_hist.append(align_err)
+                except Exception as ex:
+                    logger.warning(
+                        "[WARN] Framewise stitch failed at local frame %d: %s, keep previous cumulative transform",
+                        frame_idx,
+                        str(ex),
+                    )
+
+            frame_points = apply_sim3_direct_torch(frame_points, cum_s, cum_R, cum_t)
+
+            prev_cam_centers = (cum_R @ frame_cam_centers.T).T + cum_t[None, :]
+
+            outputs["depth"].append(frame_depth)
+            outputs["conf"].append(frame_conf)
+            outputs["intrinsics"].append(frame_intrinsics)
+            outputs["extrinsics"].append(frame_extrinsics)
+            outputs["processed_images"].append(frame_images_np)
+            outputs["world_points"].append(frame_points)
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+        # If temporal stitching is mostly unreliable, fallback to global chunk inference.
+        expected = max(total_frames - 1, 1)
+        if total_frames > 1 and accepted_transforms < max(3, int(0.15 * expected)):
+            logger.warning(
+                "[WARN] Framewise stitch unstable (%d/%d accepted). Fallback to anchor stream inference.",
+                accepted_transforms,
+                expected,
+            )
+            anchor_images = chunk_images[self.anchor_cam_index :: self.num_cameras]
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            with torch.no_grad():
+                if torch.cuda.is_available():
+                    with torch.amp.autocast("cuda", dtype=self.dtype):
+                        pred = self.model.inference(anchor_images, ref_view_strategy=ref_view_strategy)
+                else:
+                    pred = self.model.inference(anchor_images, ref_view_strategy=ref_view_strategy)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return {
+                "depth": self._to_numpy(getattr(pred, "depth", None)),
+                "conf": self._to_numpy(getattr(pred, "conf", None)) - 1.0,
+                "intrinsics": self._to_numpy(getattr(pred, "intrinsics", None)),
+                "extrinsics": self._to_numpy(getattr(pred, "extrinsics", None)),
+                "processed_images": self._to_numpy(getattr(pred, "processed_images", None)),
+                "world_points": None,
+            }
+
         return {
             "depth": np.concatenate(outputs["depth"], axis=0),
             "conf": np.concatenate(outputs["conf"], axis=0),
             "intrinsics": np.concatenate(outputs["intrinsics"], axis=0),
             "extrinsics": np.concatenate(outputs["extrinsics"], axis=0),
             "processed_images": np.concatenate(outputs["processed_images"], axis=0),
-            "world_points": None,
+            "world_points": np.concatenate(outputs["world_points"], axis=0),
         }
 
     def get_chunk_indices(self):
@@ -361,7 +494,13 @@ class FF3DR:
             # Input chunk_images is frame-major; pick the same anchor camera for each frame.
             chunk_images = chunk_images[self.anchor_cam_index :: self.num_cameras]
         elif self.model_name == "depthanything3" and self.num_cameras > 1 and self.da3_infer_mode == "framewise_multicam":
-            return self._infer_depthanything3_framewise(chunk_images, ref_view_strategy)
+            if self.da3_stable_fusion:
+                logger.warning(
+                    "[WARN] framewise_multicam is unstable on this scene; force anchor-stream fusion to avoid vertical stacking and OOM"
+                )
+                chunk_images = chunk_images[self.anchor_cam_index :: self.num_cameras]
+            else:
+                return self._infer_depthanything3_framewise(chunk_images, ref_view_strategy)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         with torch.no_grad():
@@ -831,6 +970,12 @@ def _build_parser(run_defaults):
         type=str,
         default=run_defaults.get("da3_infer_mode", "framewise_multicam"),
         help="DA3 mode: framewise_multicam/anchor_stream/global_chunk",
+    )
+    parser.add_argument(
+        "--da3_stable_fusion",
+        type=int,
+        default=int(run_defaults.get("da3_stable_fusion", 1)),
+        help="1: force stable fusion path for DA3 multicam (recommended), 0: allow raw framewise stitching",
     )
     parser.add_argument(
         "--device",

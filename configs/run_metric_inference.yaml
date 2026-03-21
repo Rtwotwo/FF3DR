@@ -1,0 +1,5 @@
+Model:
+  model_name: 'vggt'
+  base_config: './configs/base_config.yaml'
+  
+

@@ -8,5 +8,6 @@ RunArgs:
   max_chunks: -1
   num_cameras_to_use: 5
   da3_infer_mode: framewise_multicam
+  da3_stable_fusion: 1
   anchor_cam_index: 2
   device: cuda
