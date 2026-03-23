@@ -1,13 +1,16 @@
 RunArgs:
   area_path: ./dataset/WHU-OMVS/train/area1/images
   config_path: ./configs/base_config.yaml
-  output_path: ./exp/ff3dr_area1_cfg120_anchorfix_camera5
+  output_path: ./exp/run_whuomvs_area1_cam3
   model_name: depthanything3
   chunk_size: -1
   overlap: -1
   max_chunks: -1
-  num_cameras_to_use: 5
+  camera_ids: [3] # mapping camera index
+  num_cameras_to_use: 1 # if camera_ids setted, it'll be ignored
   da3_infer_mode: framewise_multicam
   da3_stable_fusion: 1
+  da3_group_frames: 8
+  da3_group_overlap: 2
   anchor_cam_index: 2
   device: cuda

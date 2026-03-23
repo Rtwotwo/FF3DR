@@ -3,9 +3,36 @@ import copy
 import json
 import logging
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import torch
 from safetensors.torch import load_file
+
+
+def _find_repo_root(start: Path) -> Path:
+    """Find project root by required top-level folders."""
+    for p in [start, *start.parents]:
+        if (p / "models").is_dir() and (p / "loop_utils").is_dir() and (p / "configs").is_dir():
+            return p
+    return start.parent
+
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _find_repo_root(_SCRIPT_DIR)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+
+def _resolve_to_repo_path(path_value: str) -> str:
+    if path_value is None:
+        return path_value
+    p = Path(path_value)
+    if p.is_absolute():
+        return str(p)
+    return str((_REPO_ROOT / p).resolve())
+
+
 from running.utils.config_utils import load_config
 from models.vggt.utils.load_fn import load_and_preprocess_images
 from models.vggt.utils.pose_enc import pose_encoding_to_extri_intri
@@ -38,6 +65,9 @@ class FF3DR:
     """
     def __init__(self, args):
         self.args = args
+        args.config_path = _resolve_to_repo_path(args.config_path)
+        args.area_path = _resolve_to_repo_path(args.area_path)
+        args.output_path = _resolve_to_repo_path(args.output_path)
         self.config = load_config(args.config_path)
         self.area_path = args.area_path
         self.model_name = args.model_name
@@ -64,8 +94,21 @@ class FF3DR:
         for p in [self.output_path, self.predictions_pcd_dir, self.predictions_loop_dir, self.predictions_aligned_dir, self.predictions_unaligned_dir]:
             os.makedirs(p, exist_ok=True)
         self.camera_dirs, self.image_paths = self._build_camera_index(self.area_path)
+
+        # Explicit camera selection has higher priority than num_cameras_to_use.
+        requested_camera_ids = [str(x) for x in getattr(args, "camera_ids", []) if str(x) != ""]
+        if len(requested_camera_ids) > 0:
+            available = {os.path.basename(p): p for p in self.camera_dirs}
+            missing = [cid for cid in requested_camera_ids if cid not in available]
+            if len(missing) > 0:
+                raise ValueError(
+                    f"[SETTING ERROR] camera_ids contains missing cameras: {missing}, available={sorted(list(available.keys()), key=lambda x: int(x) if x.isdigit() else x)}"
+                )
+            self.camera_dirs = [available[cid] for cid in requested_camera_ids]
+            self.image_paths = {k: self.image_paths[k] for k in self.camera_dirs}
+
         self.num_cameras_to_use = args.num_cameras_to_use
-        if self.num_cameras_to_use > 0:
+        if self.num_cameras_to_use > 0 and len(requested_camera_ids) == 0:
             if self.num_cameras_to_use > len(self.camera_dirs):
                 raise ValueError(
                     f"[SETTING ERROR] num_cameras_to_use={self.num_cameras_to_use} exceeds available cameras={len(self.camera_dirs)}"
@@ -77,19 +120,27 @@ class FF3DR:
         self.max_chunks = args.max_chunks
         self.anchor_cam_index = args.anchor_cam_index
         total_images = self.num_cameras * self.num_frames
+        selected_camera_names = [os.path.basename(p) for p in self.camera_dirs]
         logger.info(
-            "[INFO] Cameras=%d, synced_frames=%d, total_images=%d, chunk_size=%d, overlap=%d",
+            "[INFO] Cameras=%d, synced_frames=%d, total_images=%d, chunk_size=%d, overlap=%d, camera_ids=%s",
             self.num_cameras,
             self.num_frames,
             total_images,
             self.chunk_size,
             self.overlap,
+            selected_camera_names,
         )
         self.model = self._load_model()
         self.anchor_cam_index = self._resolve_anchor_cam_index(self.anchor_cam_index)
         logger.info("[INFO] Anchor camera index for chunk alignment: %d", self.anchor_cam_index)
         self.da3_infer_mode = args.da3_infer_mode
         self.da3_stable_fusion = bool(args.da3_stable_fusion)
+        self.da3_group_frames = max(1, int(args.da3_group_frames))
+        self.da3_group_overlap = max(0, int(args.da3_group_overlap))
+        if self.da3_group_overlap >= self.da3_group_frames:
+            raise ValueError(
+                f"[SETTING ERROR] da3_group_overlap={self.da3_group_overlap} must be smaller than da3_group_frames={self.da3_group_frames}"
+            )
         if self.da3_infer_mode not in ["anchor_stream", "framewise_multicam", "global_chunk"]:
             raise ValueError(
                 f"[SETTING ERROR] da3_infer_mode={self.da3_infer_mode} must be one of anchor_stream/framewise_multicam/global_chunk"
@@ -103,6 +154,11 @@ class FF3DR:
         if self.model_name == "depthanything3" and self.num_cameras > 1:
             logger.info("[INFO] DA3 inference mode: %s", self.da3_infer_mode)
             logger.info("[INFO] DA3 stable fusion: %s", self.da3_stable_fusion)
+            logger.info(
+                "[INFO] DA3 grouped fusion: group_frames=%d, group_overlap=%d",
+                self.da3_group_frames,
+                self.da3_group_overlap,
+            )
             if self.da3_use_anchor_stream:
                 logger.info(
                     "[INFO] DA3 multi-camera mode: using anchor camera stream only (cam=%d) for temporal consistency",
@@ -495,10 +551,7 @@ class FF3DR:
             chunk_images = chunk_images[self.anchor_cam_index :: self.num_cameras]
         elif self.model_name == "depthanything3" and self.num_cameras > 1 and self.da3_infer_mode == "framewise_multicam":
             if self.da3_stable_fusion:
-                logger.warning(
-                    "[WARN] framewise_multicam is unstable on this scene; force anchor-stream fusion to avoid vertical stacking and OOM"
-                )
-                chunk_images = chunk_images[self.anchor_cam_index :: self.num_cameras]
+                return self._infer_depthanything3_grouped_multicam(chunk_images, ref_view_strategy)
             else:
                 return self._infer_depthanything3_framewise(chunk_images, ref_view_strategy)
         if torch.cuda.is_available():
@@ -518,6 +571,154 @@ class FF3DR:
             "extrinsics": self._to_numpy(getattr(pred, "extrinsics", None)),
             "processed_images": self._to_numpy(getattr(pred, "processed_images", None)),
             "world_points": None,
+        }
+
+    def _infer_depthanything3_grouped_multicam(self, chunk_images, ref_view_strategy):
+        """Stable multi-camera fusion with group-wise joint inference + inter-group anchor constraints."""
+        total_frames = len(chunk_images) // self.num_cameras
+        group_frames = min(self.da3_group_frames, total_frames)
+        overlap = min(self.da3_group_overlap, max(group_frames - 1, 0))
+        step = max(group_frames - overlap, 1)
+
+        group_ranges = []
+        s = 0
+        while s < total_frames:
+            e = min(s + group_frames, total_frames)
+            group_ranges.append((s, e))
+            if e == total_frames:
+                break
+            s += step
+
+        output_lists = {
+            "depth": [],
+            "conf": [],
+            "intrinsics": [],
+            "extrinsics": [],
+            "processed_images": [],
+            "world_points": [],
+        }
+
+        prev_group_points = None
+        prev_group_conf = None
+        cum_s = 1.0
+        cum_R = np.eye(3, dtype=np.float32)
+        cum_t = np.zeros(3, dtype=np.float32)
+        align_err_hist = []
+
+        for gi, (fs, fe) in enumerate(group_ranges):
+            group_images = []
+            for f in range(fs, fe):
+                base = f * self.num_cameras
+                group_images.extend(chunk_images[base : base + self.num_cameras])
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            with torch.no_grad():
+                if torch.cuda.is_available():
+                    with torch.amp.autocast("cuda", dtype=self.dtype):
+                        pred = self.model.inference(group_images, ref_view_strategy=ref_view_strategy)
+                else:
+                    pred = self.model.inference(group_images, ref_view_strategy=ref_view_strategy)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            g_depth = self._to_numpy(getattr(pred, "depth", None))
+            g_conf = self._to_numpy(getattr(pred, "conf", None)) - 1.0
+            g_intr = self._to_numpy(getattr(pred, "intrinsics", None))
+            g_extr = self._to_numpy(getattr(pred, "extrinsics", None))
+            g_img = self._to_numpy(getattr(pred, "processed_images", None))
+            g_points = depth_to_point_cloud_optimized_torch(g_depth, g_intr, g_extr)
+
+            g_num_frames = fe - fs
+            if gi > 0 and overlap > 0 and prev_group_points is not None:
+                use_overlap = min(overlap, g_num_frames)
+                prev_overlap_points = self._select_anchor_from_frame_major(
+                    prev_group_points,
+                    use_overlap,
+                    from_tail=True,
+                )
+                prev_overlap_conf = self._select_anchor_from_frame_major(
+                    prev_group_conf,
+                    use_overlap,
+                    from_tail=True,
+                )
+                cur_overlap_points = self._select_anchor_from_frame_major(
+                    g_points,
+                    use_overlap,
+                    from_tail=False,
+                )
+                cur_overlap_conf = self._select_anchor_from_frame_major(
+                    g_conf,
+                    use_overlap,
+                    from_tail=False,
+                )
+
+                conf_threshold = min(np.median(prev_overlap_conf), np.median(cur_overlap_conf)) * 0.1
+                gs, gR, gt = weighted_align_point_maps(
+                    prev_overlap_points,
+                    prev_overlap_conf,
+                    cur_overlap_points,
+                    cur_overlap_conf,
+                    conf_threshold=conf_threshold,
+                    config=self.config,
+                    precompute_scale=None,
+                )
+                gerr = float(
+                    compute_alignment_error(
+                        prev_overlap_points,
+                        prev_overlap_conf,
+                        cur_overlap_points,
+                        cur_overlap_conf,
+                        conf_threshold,
+                        gs,
+                        gR,
+                        gt,
+                    )
+                )
+
+                if len(align_err_hist) < 2:
+                    is_bad = gerr > 0.6
+                else:
+                    err_thr = max(0.5, 2.8 * float(np.median(align_err_hist)))
+                    is_bad = gerr > err_thr
+
+                if not is_bad:
+                    cum_s = float(gs * cum_s)
+                    cum_R = gR @ cum_R
+                    cum_t = gs * (gR @ cum_t) + gt
+                else:
+                    logger.warning(
+                        "[WARN] Group stitch outlier at group %d: err=%.4f, keep previous cumulative transform",
+                        gi,
+                        gerr,
+                    )
+                align_err_hist.append(gerr)
+
+            g_points = apply_sim3_direct_torch(g_points, cum_s, cum_R, cum_t)
+
+            # Remove overlap duplicates when appending current group outputs.
+            if gi == 0:
+                keep_start = 0
+            else:
+                keep_start = overlap * self.num_cameras
+
+            output_lists["depth"].append(g_depth[keep_start:])
+            output_lists["conf"].append(g_conf[keep_start:])
+            output_lists["intrinsics"].append(g_intr[keep_start:])
+            output_lists["extrinsics"].append(g_extr[keep_start:])
+            output_lists["processed_images"].append(g_img[keep_start:])
+            output_lists["world_points"].append(g_points[keep_start:])
+
+            prev_group_points = g_points
+            prev_group_conf = g_conf
+
+        return {
+            "depth": np.concatenate(output_lists["depth"], axis=0),
+            "conf": np.concatenate(output_lists["conf"], axis=0),
+            "intrinsics": np.concatenate(output_lists["intrinsics"], axis=0),
+            "extrinsics": np.concatenate(output_lists["extrinsics"], axis=0),
+            "processed_images": np.concatenate(output_lists["processed_images"], axis=0),
+            "world_points": np.concatenate(output_lists["world_points"], axis=0),
         }
 
     def _infer_pi3(self, chunk_images):
@@ -908,7 +1109,7 @@ def _build_parser(run_defaults):
     parser.add_argument(
         "--run_args_yaml",
         type=str,
-        default="./configs/ff3dr_args.yaml",
+        default=str(_REPO_ROOT / "configs" / "run_all_inference.yaml"),
         help="YAML file with default startup arguments",
     )
     parser.add_argument(
@@ -920,7 +1121,7 @@ def _build_parser(run_defaults):
     parser.add_argument(
         "--config_path",
         type=str,
-        default=run_defaults.get("config_path", "./configs/base_config.yaml"),
+        default=run_defaults.get("config_path", str(_REPO_ROOT / "configs" / "base_config.yaml")),
         help="Config file path",
     )
     parser.add_argument(
@@ -966,6 +1167,13 @@ def _build_parser(run_defaults):
         help="How many sorted camera folders to use, -1 means all",
     )
     parser.add_argument(
+        "--camera_ids",
+        type=str,
+        nargs="*",
+        default=run_defaults.get("camera_ids", []),
+        help="Explicit camera folder names to use, e.g. --camera_ids 1 3 5; higher priority than num_cameras_to_use",
+    )
+    parser.add_argument(
         "--da3_infer_mode",
         type=str,
         default=run_defaults.get("da3_infer_mode", "framewise_multicam"),
@@ -978,6 +1186,18 @@ def _build_parser(run_defaults):
         help="1: force stable fusion path for DA3 multicam (recommended), 0: allow raw framewise stitching",
     )
     parser.add_argument(
+        "--da3_group_frames",
+        type=int,
+        default=int(run_defaults.get("da3_group_frames", 8)),
+        help="Frames per multicam inference group when stable fusion is enabled",
+    )
+    parser.add_argument(
+        "--da3_group_overlap",
+        type=int,
+        default=int(run_defaults.get("da3_group_overlap", 2)),
+        help="Frame overlap between adjacent multicam inference groups",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=run_defaults.get("device", "cpu"),
@@ -988,7 +1208,11 @@ def _build_parser(run_defaults):
 
 if __name__ == "__main__":
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--run_args_yaml", type=str, default="./configs/ff3dr_args.yaml")
+    pre_parser.add_argument(
+        "--run_args_yaml",
+        type=str,
+        default=str(_REPO_ROOT / "configs" / "run_all_inference.yaml"),
+    )
     pre_args, _ = pre_parser.parse_known_args()
     defaults = _load_run_arg_defaults(pre_args.run_args_yaml)
 
