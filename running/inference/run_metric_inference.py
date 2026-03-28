@@ -5,7 +5,6 @@ import argparse
 import json
 from pathlib import Path
 from safetensors.torch import load_file
-
 # TODO: address the outfolder import issue
 from metrics import compute_metrics
 from utils.config_utils import load_config
