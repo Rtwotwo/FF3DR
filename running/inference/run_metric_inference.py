@@ -74,13 +74,4 @@ class MetricInfer:
             model.eval().to(self.device)
             logger.info("[INFO] Model loaded: %s", self.model_name)
             return model
-        
-
-
-                
-
-
-
-
-
 

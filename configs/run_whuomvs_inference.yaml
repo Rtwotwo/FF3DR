@@ -1,7 +1,7 @@
 RunArgs:
   area_path: ./dataset/WHU-OMVS/train/area1/images
   config_path: ./configs/base_config.yaml
-  output_path: ./exp/run_whuomvs_area1_cam3
+  output_path: ./exp/whu-omvs/run_whuomvs_depthanything3_train_area1_came3
   model_name: depthanything3
   chunk_size: -1
   overlap: -1

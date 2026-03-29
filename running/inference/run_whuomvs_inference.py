@@ -1109,7 +1109,7 @@ def _build_parser(run_defaults):
     parser.add_argument(
         "--run_args_yaml",
         type=str,
-        default=str(_REPO_ROOT / "configs" / "run_all_inference.yaml"),
+        default=str(_REPO_ROOT / "configs" / "run_whuomvs_inference.yaml"),
         help="YAML file with default startup arguments",
     )
     parser.add_argument(
@@ -1211,7 +1211,7 @@ if __name__ == "__main__":
     pre_parser.add_argument(
         "--run_args_yaml",
         type=str,
-        default=str(_REPO_ROOT / "configs" / "run_all_inference.yaml"),
+        default=str(_REPO_ROOT / "configs" / "run_whuomvs_inference.yaml"),
     )
     pre_args, _ = pre_parser.parse_known_args()
     defaults = _load_run_arg_defaults(pre_args.run_args_yaml)

@@ -1,0 +1,18 @@
+RunArgs:
+  area_path: ./dataset/MatrixCity/small_city/aerial/train
+  block_name: block_1
+  config_path: ./configs/base_config.yaml
+  output_path: ./exp/matrixcity/run_matrixcity_depthanything3_train_block_1
+  model_name: depthanything3
+  chunk_size: -1
+  overlap: -1
+  max_chunks: -1
+  anchor_cam_index: -1
+  num_cameras_to_use: -1
+  camera_ids: []
+  da3_infer_mode: global_chunk
+  da3_stable_fusion: 1
+  da3_group_frames: 8
+  da3_group_overlap: 2
+  device: cuda
+
