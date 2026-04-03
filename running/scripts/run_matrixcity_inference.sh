@@ -4,7 +4,7 @@
 
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/MatrixCity"
 TRAIN_TEST_SPLIT="train"
-MODEL_NAME="depthanything3"
+MODEL_NAME="mapanything"
 GPU_ID=6
 
 
