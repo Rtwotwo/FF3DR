@@ -4,8 +4,8 @@
 
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/MatrixCity"
 TRAIN_TEST_SPLIT="train"
-MODEL_NAME="mapanything"
-GPU_ID=6
+MODEL_NAME="depthanything3"
+GPU_ID=1
 
 
 # run reconstruction model to inference

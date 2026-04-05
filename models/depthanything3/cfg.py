@@ -22,10 +22,11 @@ from typing import Any, Callable, List, Union
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 try:
-    OmegaConf.register_new_resolver("eval", eval)
+    if not OmegaConf.has_resolver("eval"):
+        OmegaConf.register_new_resolver("eval", eval)
 except Exception as e:
-    # if eval is not available, we can just pass
-    print(f"Error registering eval resolver: {e}")
+    # Keep backward compatibility for older OmegaConf versions and repeated imports.
+    pass
 
 
 def load_config(path: str, argv: List[str] = None) -> Union[DictConfig, ListConfig]:

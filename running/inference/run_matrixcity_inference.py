@@ -73,8 +73,18 @@ class FF3DR:
         self.area_path = self._resolve_single_block_area_path(args.area_path, getattr(args, "block_name", ""))
         self.model_name = args.model_name
         self.output_path = args.output_path
-        if args.device in ["cuda", "cpu"]:
-            self.device = args.device
+        requested_device = str(args.device).strip().lower()
+        if requested_device == "cpu":
+            self.device = "cpu"
+        elif requested_device.startswith("cuda"):
+            if torch.cuda.is_available():
+                self.device = requested_device
+            else:
+                self.device = "cpu"
+                logger.warning(
+                    "[WARN] Requested device '%s' but CUDA is unavailable. Falling back to CPU.",
+                    args.device,
+                )
         else:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         cfg_chunk_size = int(self.config["Model"]["chunk_size"])
@@ -84,7 +94,7 @@ class FF3DR:
         self.overlap = args.overlap if args.overlap >= 0 else cfg_overlap
         if self.overlap >= self.chunk_size:
             raise ValueError(f"[SETTING ERROR] overlap={self.overlap} must be smaller than chunk_size={self.chunk_size}")
-        if torch.cuda.is_available():
+        if self.device.startswith("cuda") and torch.cuda.is_available():
             self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         else:
             self.dtype = torch.float32
@@ -275,20 +285,33 @@ class FF3DR:
             state_dict = load_file(da3_weight_path)
             model.load_state_dict(state_dict, strict=False)
         elif self.model_name == "mapanything":
-            try:
-                with open(self.config["Weights"]["mapanything"]["MAP_CONFIG"], "r") as f:
-                    map_config = json.load(f)
-                # Compat fix: newer uniception expects callable mlp_layer instead of string.
-                if isinstance(map_config, dict):
-                    info_cfg = map_config.get("info_sharing_config", {})
-                    module_args = info_cfg.get("module_args", {})
-                    if module_args.get("mlp_layer", None) == "mlp":
-                        module_args["mlp_layer"] = Mlp
-                model = MapAnything(**map_config)
-                state_dict = load_file(self.config["Weights"]["mapanything"]["MAP"])
-                model.load_state_dict(state_dict, strict=False)
-            except Exception:
-                model = MapAnything.from_pretrained(self.config["Weights"]["mapanything"]["MAP_URL"])
+            map_config_path = _resolve_to_repo_path(
+                self._cfg_get_weight("mapanything", "MAP_CONFIG", fallback_flat_key="MAP_CONFIG")
+            )
+            map_weight_path = _resolve_to_repo_path(
+                self._cfg_get_weight("mapanything", "MAP", fallback_flat_key="MAP")
+            )
+            if not os.path.isfile(map_config_path):
+                raise RuntimeError(f"[ERROR] MapAnything config not found: {map_config_path}")
+            if not os.path.isfile(map_weight_path):
+                raise RuntimeError(f"[ERROR] MapAnything weight not found: {map_weight_path}")
+
+            logger.info("[INFO] Loading MapAnything config from local path: %s", map_config_path)
+            logger.info("[INFO] Loading MapAnything weight from local path: %s", map_weight_path)
+
+            with open(map_config_path, "r") as f:
+                map_config = json.load(f)
+
+            # Compat fix: newer uniception expects callable mlp_layer instead of string.
+            if isinstance(map_config, dict):
+                info_cfg = map_config.get("info_sharing_config", {})
+                module_args = info_cfg.get("module_args", {})
+                if module_args.get("mlp_layer", None) == "mlp":
+                    module_args["mlp_layer"] = Mlp
+
+            model = MapAnything(**map_config)
+            state_dict = load_file(map_weight_path)
+            model.load_state_dict(state_dict, strict=False)
         elif self.model_name == "pi3":
             _ = self.config["Weights"]["pi3"]["PI3_CONFIG"]
             model = Pi3()

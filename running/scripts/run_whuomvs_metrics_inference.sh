@@ -14,7 +14,7 @@ MODEL_NAME="depthanything3"
 ALIGN_MODE="none"
 BATCH_SIZE=8
 CAME_IDS=(3)
-GPU_ID=0
+GPU_ID=6
 
 
 # run metric inference
