@@ -231,9 +231,19 @@ class MetricInfer:
             depth = pred_list[0]["depth_z"]
             if isinstance(depth, torch.Tensor):
                 depth = depth.detach().cpu().numpy()
-            depth = np.asarray(depth)
-            if depth.ndim == 3 and depth.shape[-1] == 1:
-                depth = np.squeeze(depth, axis=-1)
+            depth = np.asarray(depth, dtype=np.float32)
+            # MapAnything returns depth_z as (B, H, W, 1). For single-image inference,
+            # we need a plain 2D depth map before batching.
+            depth = np.squeeze(depth)
+            if depth.ndim == 3:
+                if depth.shape[0] == 1:
+                    depth = depth[0]
+                elif depth.shape[-1] == 1:
+                    depth = depth[..., 0]
+            if depth.ndim != 2:
+                raise RuntimeError(
+                    f"[ERROR] Unexpected mapanything depth shape for {image_path}: {depth.shape}"
+                )
             outputs.append(depth)
         return np.stack(outputs, axis=0)
 
@@ -282,6 +292,22 @@ class MetricInfer:
     def _prepare_prediction(self, pred_depth, gt_depth):
         pred_depth = np.asarray(pred_depth, dtype=np.float32)
         gt_depth = np.asarray(gt_depth, dtype=np.float32)
+
+        # Accept common tensor layouts like (1,H,W), (H,W,1), (1,H,W,1) and reduce to (H,W).
+        pred_depth = np.squeeze(pred_depth)
+        if pred_depth.ndim == 3:
+            if pred_depth.shape[0] == 1:
+                pred_depth = pred_depth[0]
+            elif pred_depth.shape[-1] == 1:
+                pred_depth = pred_depth[..., 0]
+
+        if pred_depth.ndim != 2:
+            raise RuntimeError(
+                f"[ERROR] pred_depth must be 2D after squeeze, got shape={pred_depth.shape}, gt_shape={gt_depth.shape}"
+            )
+        if gt_depth.ndim != 2 or gt_depth.shape[0] <= 0 or gt_depth.shape[1] <= 0:
+            raise RuntimeError(f"[ERROR] Invalid gt_depth shape: {gt_depth.shape}")
+
         if pred_depth.shape != gt_depth.shape:
             pred_depth = cv2.resize(pred_depth, (gt_depth.shape[1], gt_depth.shape[0]), interpolation=cv2.INTER_LINEAR)
         return pred_depth
@@ -383,7 +409,7 @@ def parse_args():
     parser.add_argument(
         "--align_mode",
         type=str,
-        default="none",
+        default="median",
         choices=["none", "median"],
         help="Optional per-image scale alignment before metric computation.",
     )
@@ -392,6 +418,13 @@ def parse_args():
         type=str,
         default=str(_REPO_ROOT / "exp" / "whu-omvs" / "metric_eval"),
         help="Directory for saving the metrics json.",
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        choices=["depthanything3", "mapanything", "pi3", "vggt"],
+        help="Model name override. If provided, it supersedes Model.name in config.",
     )
     parser.add_argument("--log_level", type=str, default="INFO", help="Python logging level.")
     return parser.parse_args()
@@ -407,6 +440,11 @@ def main():
     output_path.mkdir(parents=True, exist_ok=True)
 
     cfg = load_config(config_path)
+    if args.model_name is not None:
+        if "Model" not in cfg or not isinstance(cfg["Model"], dict):
+            cfg["Model"] = {}
+        cfg["Model"]["name"] = args.model_name
+
     runner = MetricInfer(
         cfg=cfg,
         dataset_path=dataset_path,

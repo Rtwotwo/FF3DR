@@ -10,8 +10,8 @@
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/WHU-OMVS"
 CONFIG_PATH="/data2/dataset/Redal/work_feedforward_3drepo/configs/base_config.yaml"
 TRAIN_TEST_SPLIT="test"
-MODEL_NAME="depthanything3"
-ALIGN_MODE="none"
+MODEL_NAME="vggt"
+ALIGN_MODE="median"
 BATCH_SIZE=8
 CAME_IDS=(3)
 GPU_ID=6
@@ -31,6 +31,7 @@ if [[ "$TRAIN_TEST_SPLIT" == "train" ]]; then
 				--camera_id "$CAME_ID" \
 				--batch_size "$BATCH_SIZE" \
 				--align_mode "$ALIGN_MODE" \
+				--model_name "$MODEL_NAME" \
 				--output_path "./exp/whu-omvs/metric_eval/${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${AREA_ID}_came${CAME_ID}"
 		done
 	done
@@ -47,6 +48,7 @@ elif [[ "$TRAIN_TEST_SPLIT" == "test" ]]; then
 				--camera_id "$CAME_ID" \
 				--batch_size "$BATCH_SIZE" \
 				--align_mode "$ALIGN_MODE" \
+				--model_name "$MODEL_NAME" \
 				--output_path "./exp/whu-omvs/metric_eval/${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${AREA_ID}_came${CAME_ID}"
 		done
 	done
@@ -61,6 +63,7 @@ elif [[ "$TRAIN_TEST_SPLIT" == "predict" ]]; then
 			--camera_id "$CAME_ID" \
 			--batch_size "$BATCH_SIZE" \
 			--align_mode "$ALIGN_MODE" \
+			--model_name "$MODEL_NAME" \
 			--output_path "./exp/whu-omvs/metric_eval/${MODEL_NAME}_${TRAIN_TEST_SPLIT}_came${CAME_ID}"
 	done
 fi

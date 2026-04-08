@@ -302,6 +302,15 @@ class FF3DR:
             with open(map_config_path, "r") as f:
                 map_config = json.load(f)
 
+            # Local inference path: avoid encoder bootstrap from torch hub.
+            if isinstance(map_config, dict):
+                enc_cfg = map_config.get("encoder_config", {})
+                if isinstance(enc_cfg, dict) and enc_cfg.get("uses_torch_hub", False):
+                    logger.info(
+                        "[INFO] Overriding MapAnything encoder_config.uses_torch_hub=True -> False for local-only loading"
+                    )
+                    enc_cfg["uses_torch_hub"] = False
+
             # Compat fix: newer uniception expects callable mlp_layer instead of string.
             if isinstance(map_config, dict):
                 info_cfg = map_config.get("info_sharing_config", {})
