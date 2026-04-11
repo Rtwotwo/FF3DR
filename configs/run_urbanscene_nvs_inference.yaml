@@ -1,0 +1,42 @@
+RunArgs:
+  area_path: ./dataset/UrbanScene/ArtSci
+  output_path: ./exp/urbanscene_nvs/run_urbanscene_g3splat_ArtSci
+  g3splat_config_dir: ./clones/g3splat/config
+  checkpoint: ./weights/g3splat/g3splat_mast3r_3dgs_align_orient_re10k.ckpt
+  experiment: re10k_align_orient
+  gaussian_type: 3d
+  device: cuda
+
+  anchor_camera: 0
+  image_size: 256
+
+  # Rendering memory controls
+  interp_frames_per_pair: 16
+  render_batch_size: 4
+
+  # Long-sequence chunking controls (pair-level)
+  pair_chunk_size: 120
+  pair_overlap: 20
+  max_pair_chunks: -1
+
+  fps: 24
+  near: 0.1
+  far: 100.0
+
+  # Normalized intrinsics used for dummy/pnp pipeline
+  fx: 0.86
+  fy: 0.86
+  cx: 0.5
+  cy: 0.5
+
+  pnp_opacity_threshold: 0.3
+  fallback_baseline: 0.1
+
+  # PLY export controls
+  save_ply: 1
+  save_pair_ply: 0
+  save_merged_ply: 1
+  ply_use_global_pose_alignment: 1
+  ply_opacity_threshold: 0.2
+  max_points_per_pair: 4000
+  max_total_ply_points: 3000000

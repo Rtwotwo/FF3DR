@@ -22,9 +22,9 @@ if [[ "$TRAIN_TEST_SPLIT" == "train" ]]; then
     for AREA_ID in "${AREA_IDS[@]}"; do
         for CAME_ID in "${CAME_IDS[@]}"; do
             echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${AREA_ID} came${CAME_ID}..."
-            CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_all_inference.py" \
+            CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_whuomvs_inference.py" \
                 --area_path "$DATASET_PATH/$TRAIN_TEST_SPLIT/$AREA_ID/images" \
-                --output_path "./exp/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${AREA_ID}_came${CAME_ID}" \
+                --output_path "./exp/whu-omvs/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${AREA_ID}_came${CAME_ID}" \
                 --camera_ids "$CAME_ID" \
                 --model_name "$MODEL_NAME"
         done
@@ -35,9 +35,9 @@ elif [[ "$TRAIN_TEST_SPLIT" == "test" ]]; then
     for AREA_ID in "${AREA_IDS[@]}"; do
         for CAME_ID in "${CAME_IDS[@]}"; do
             echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${AREA_ID} came${CAME_ID}..."
-            CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_all_inference.py" \
+            CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_whuomvs_inference.py" \
                 --area_path "$DATASET_PATH/$TRAIN_TEST_SPLIT/$AREA_ID/images" \
-                --output_path "./exp/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${AREA_ID}_came${CAME_ID}" \
+                --output_path "./exp/whu-omvs/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${AREA_ID}_came${CAME_ID}" \
                 --camera_ids "$CAME_ID" \
                 --model_name "$MODEL_NAME"
         done
@@ -47,9 +47,9 @@ elif [[ "$TRAIN_TEST_SPLIT" == "predict" ]]; then
     CAME_IDS=(1 2 3 4 5)
     for CAME_ID in "${CAME_IDS[@]}"; do
         echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for came${CAME_ID}..."
-        CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_all_inference.py" \
+        CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_whuomvs_inference.py" \
             --area_path "$DATASET_PATH/$TRAIN_TEST_SPLIT/images" \
-            --output_path "./exp/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_came${CAME_ID}" \
+            --output_path "./exp/whu-omvs/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_came${CAME_ID}" \
             --camera_ids "$CAME_ID" \
             --model_name "$MODEL_NAME"
     done
