@@ -4,8 +4,8 @@
 
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/UrbanScene"
 OUTPUT_ROOT="./exp/urbanscene"
-# SCENES=('PolyTech')
-SCENES=('ArtSci')
+# SCENES=('PolyTech' 'ArtSci' 'School' 'Bridge' 'Castle' 'Town')
+SCENES=('School' 'Bridge' 'Castle' 'Town')
 MODEL_NAME="vggt"
 GPU_ID=6
  

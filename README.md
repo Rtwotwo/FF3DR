@@ -1,20 +1,43 @@
 # :rocket: Project Guide :rocket:
 
+## 🔨 Installation 🔨
+
+
+
+## 🎉️ Visualization 🎉️
+
+
+
 ## 🌍 Dataset 🌍
 
-### 1.WHU-OMVS Dataset
+### WHU-OMVS Dataset
 
 The dataset used in the experiment is mainly the [WHU-OMVS Dataset](https://gpcv.whu.edu.cn/data/WHU_OMVS_dataset/WHU_dataset.htm), which includes four compressed packages: train.zip (67.1G), test.zip (22.1G), predict.zip (45.7G), and readme.zip (1.72K). Following the division of the WHU-MVS dataset, the data of Area #1/4/5/6 were used for the training. One slight difference is that both Area #2 and Area #3 were used for the testing in Liu and Ji (2020), whereas, in this work, Area #2 was treated as the validation region and Area #3 was the test region.
-
-<div align="center">
-  <img src="assets/dataset_map.jpg" alt="dataset_map">s
-</div>
 
 The simulated cameras were arranged following a typical oblique five-view camera system. There is no displacement among the five cameras, that is, the five cameras are positioned to share the same projection center while looking in different directions. Camera #3 looks straight down, while the remaining four cameras have a tilt angle of 40°. Specifically, Camera #1 and Camera #5 look forward and backward, respectively, while Camera #2 and Camera #4 look to the right and left, respectively.
 
 <div align="center">
+  <img src="assets/dataset_map.jpg" alt="dataset_map"> 
   <img src="assets/uav_cameras.jpg" alt="dataset_map">
 </div>
 
-### 2.MatrixCity Dataset
+### MatrixCity Dataset
+
+[MatrixCity](https://city-super.github.io/matrixcity/) have constructed a large-scale, comprehensive, and high-quality synthetic dataset for urban-level neural rendering research. Leveraging Unreal Engine 5's city sample project, we have developed a pipeline that enables convenient collection of urban aerial and street-view images with authentic camera poses, while acquiring a range of additional data modalities. This pipeline also allows flexible control over environmental factors such as lighting, weather, pedestrians, and traffic flow, meeting the diverse requirements of tasks covering urban-level neural rendering and other related fields. The resulting pilot dataset, MatrixCity, contains 60,000 aerial images and 350,000 street-view images derived from two city maps covering a total area of 28 square kilometers.
+
+<div align="center">
+  <img src="assets/matrixcity_map.jpg" alt="dataset_map">
+  <img src="assets/matrixcity_aera.jpg" alt="dataset_map">
+</div>
+
+### UrbanScene Dataset
+
+[UrbanScene3D](https://vcc.tech/UrbanScene3D) is a large-scale data platform designed for research on urban scene perception and reconstruction. UrbanScene3D contains over 128,000 high-resolution images covering 16 scenarios, including large real urban areas and synthetic cities, with a total area of 136 square kilometers. The dataset also features high-precision LiDAR scans and hundreds of image sets with diverse observation modalities, providing a comprehensive benchmark for designing and evaluating aerial path planning and 3D reconstruction algorithms. In addition, the dataset is built on the Unreal Engine and AirSim simulator, and is equipped with manually annotated unique instance labels for each building, supporting the generation of various types of data such as 2D depth maps, 2D/3D bounding boxes, and 3D point cloud/mesh segmentation. The simulator, equipped with a physics engine and lighting system, not only generates diverse data but also enables users to simulate cars and drones in proposed urban environments for future research.
+
+<div align="center">
+  <img src="assets/polytech.jpg" alt="dataset_map">
+  <img src="assets/artsci.jpg" alt="dataset_map">
+</div>
+
+## ❤️ Thanks ❤️
 

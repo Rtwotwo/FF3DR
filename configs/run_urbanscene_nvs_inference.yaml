@@ -34,9 +34,17 @@ RunArgs:
 
   # PLY export controls
   save_ply: 1
+  save_gaussian_ply: 1
   save_pair_ply: 0
   save_merged_ply: 1
+  save_pair_gaussian_ply: 0
+  save_merged_gaussian_ply: 1
   ply_use_global_pose_alignment: 1
+  gaussian_use_global_pose_alignment: 1
+  gaussian_shift_and_scale: 0
   ply_opacity_threshold: 0.2
+  gaussian_opacity_threshold: 0.2
   max_points_per_pair: 4000
   max_total_ply_points: 3000000
+  max_gaussians_per_pair: 4000
+  max_total_gaussians: 3000000
