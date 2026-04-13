@@ -7,6 +7,14 @@ RunArgs:
   gaussian_type: 3d
   device: cuda
 
+  # Optional DA3 GS sidecar export (works when model_name=depthanything3 path is used)
+  enable_da3_gs: 0
+  da3_export_format: gs_video
+  da3_export_dir: ./exp/urbanscene_nvs/da3_gs_exports
+  merge_da3_gs_pointcloud: 1
+  da3_merge_max_points: 0
+  da3_merge_output_name: da3_gs_merged_points.ply
+
   anchor_camera: 0
   image_size: 256
 

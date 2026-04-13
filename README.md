@@ -2,13 +2,30 @@
 
 ## 🔨 Installation 🔨
 
-
-
 ## 🎉️ Visualization 🎉️
 
+Currently, we render the PolyTech scene in UrbanScene3D and display its gsplt rendering effect as well as the depth prediction effect of Depthanything3. Subsequently, we will measure the PSNR, SSIM and LPILS indices after rendering to provide a reference for evaluating the performance of the feedforward 3D reconstruction model in regressing 3D representations using aerial images captured from a drone perspective.
 
+<div align="center">
+  <video controls width="960" preload="metadata">
+    <source src="assets/0001.mp4" type="video/mp4">
+  </video>
+</div>
+<div align="center">
+  <video controls width="960" preload="metadata">
+    <source src="assets/0002.mp4" type="video/mp4">
+  </video>
+</div>
 
 ## 🌍 Dataset 🌍
+
+We have provided dataset download scripts for [WHU-OMVS](download/download_whuomvs.sh) and [MatrixCity-SmallCity](download/download_matrixcity.sh). You can run the scripts within the project folder to download the datasets. However, for the UrbanScene3D dataset, as official download links are provided, you can download the required parts from the corresponding [UrbanScene Baidu Netdisk](https://pan.baidu.com/s/1nqurXpbMzFo_-Cmf6eheOw?pwd=7zdg).
+
+```bash
+cd your/project/directory && mkdir dataset
+bash ./download/download_matrixcity.sh
+bash ./download/download_whuomvs.sh
+```
 
 ### WHU-OMVS Dataset
 
@@ -40,4 +57,3 @@ The simulated cameras were arranged following a typical oblique five-view camera
 </div>
 
 ## ❤️ Thanks ❤️
-

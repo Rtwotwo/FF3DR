@@ -1,0 +1,13 @@
+RunArgs:
+  run_args_yaml: ./configs/run_urbanscene_metric_inference.yaml
+  config_path: ./configs/base_config.yaml
+  dataset_path: ./dataset/UrbanScene
+  scenes: []
+  depth_root: null
+  mask_root: null
+  depth_scale: 1000.0
+  batch_size: 8
+  align_mode: median
+  output_path: ./exp/urbanscene/metric_eval
+  model_name: vggt
+  log_level: INFO
