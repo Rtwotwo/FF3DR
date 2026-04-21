@@ -12,7 +12,8 @@ RunArgs:
   da3_export_format: gs_video
   da3_export_dir: ./exp/urbanscene_nvs/da3_gs_exports
   merge_da3_gs_pointcloud: 1
-  da3_merge_max_points: 0
+  da3_chunk_max_points: 2000000
+  da3_merge_max_points: 8000000
   da3_merge_output_name: da3_gs_merged_points.ply
 
   anchor_camera: 0

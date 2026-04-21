@@ -211,7 +211,8 @@ class FF3DR:
                 )
 
         self.merge_da3_gs_pointcloud = bool(int(getattr(args, "merge_da3_gs_pointcloud", 1)))
-        self.da3_merge_max_points = int(getattr(args, "da3_merge_max_points", 3000000))
+        self.da3_chunk_max_points = int(getattr(args, "da3_chunk_max_points", 2000000))
+        self.da3_merge_max_points = int(getattr(args, "da3_merge_max_points", 8000000))
         self.da3_merge_output_name = str(getattr(args, "da3_merge_output_name", "da3_gs_merged_points.ply")).strip()
 
     def _cfg_get_weight(self, model_key, field, fallback_flat_key=None):
@@ -752,6 +753,9 @@ class FF3DR:
                     )
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+            self._compress_da3_chunk_gs_ply(export_dir, chunk_idx)
+
             logger.info(
                 "[INFO] DA3 GS sidecar export done: chunk=%s, elapsed=%.2fs, dir=%s",
                 str(chunk_idx),
@@ -1367,6 +1371,79 @@ class FF3DR:
                 data[name] = gaussians[:, idx]
             data.tofile(f)
 
+    def _compress_da3_chunk_gs_ply(self, export_dir, chunk_idx):
+        if self.da3_export_format != "gs_ply":
+            return
+        if self.da3_chunk_max_points <= 0:
+            return
+
+        ply_path = os.path.join(export_dir, "gs_ply", "0000.ply")
+        if not os.path.isfile(ply_path):
+            logger.warning("[WARN] Skip chunk gs_ply compression (missing): %s", ply_path)
+            return
+
+        header = self._read_binary_ply_header(ply_path)
+        if not header["format_ok"] or header["vertex_count"] <= 0:
+            logger.warning("[WARN] Skip chunk gs_ply compression (invalid header): %s", ply_path)
+            return
+
+        prop_names = [name for _, name in header["properties"]]
+        expected = [
+            "x",
+            "y",
+            "z",
+            "nx",
+            "ny",
+            "nz",
+            "f_dc_0",
+            "f_dc_1",
+            "f_dc_2",
+            "opacity",
+            "scale_0",
+            "scale_1",
+            "scale_2",
+            "rot_0",
+            "rot_1",
+            "rot_2",
+            "rot_3",
+        ]
+        if prop_names[: len(expected)] != expected:
+            logger.warning("[WARN] Skip chunk gs_ply compression (unexpected schema): %s", ply_path)
+            return
+
+        with open(ply_path, "rb") as f:
+            f.seek(header["header_bytes"], os.SEEK_SET)
+            raw = np.fromfile(f, dtype="<f4", count=header["vertex_count"] * len(prop_names))
+        if raw.size != header["vertex_count"] * len(prop_names):
+            logger.warning("[WARN] Skip chunk gs_ply compression (corrupted): %s", ply_path)
+            return
+
+        gaussians = raw.reshape(header["vertex_count"], len(prop_names)).astype(np.float32, copy=False)
+        if gaussians.shape[0] <= self.da3_chunk_max_points:
+            return
+
+        before_n = gaussians.shape[0]
+        before_bytes = os.path.getsize(ply_path)
+
+        opacity_logit = gaussians[:, 9]
+        opacity_score = 1.0 / (1.0 + np.exp(-np.clip(opacity_logit, -20.0, 20.0)))
+        keep_idx = np.argpartition(opacity_score, -self.da3_chunk_max_points)[-self.da3_chunk_max_points :]
+        keep_idx = np.sort(keep_idx)
+        gaussians = gaussians[keep_idx]
+
+        self._write_gaussian_binary_ply(ply_path, gaussians)
+
+        after_n = gaussians.shape[0]
+        after_bytes = os.path.getsize(ply_path)
+        logger.info(
+            "[INFO] DA3 chunk gs_ply compressed: chunk=%s, keep=%d/%d, size=%.2fMB->%.2fMB",
+            str(chunk_idx),
+            after_n,
+            before_n,
+            before_bytes / (1024.0 * 1024.0),
+            after_bytes / (1024.0 * 1024.0),
+        )
+
     def _merge_da3_gs_chunk_pointcloud(self, cumulative_sim3, num_chunks):
         if not self.enable_da3_gs:
             return
@@ -1449,12 +1526,16 @@ class FF3DR:
         merged_gaussians = np.concatenate(points_list, axis=0)
 
         if self.da3_merge_max_points > 0 and merged_gaussians.shape[0] > self.da3_merge_max_points:
-            keep_idx = np.random.choice(
-                merged_gaussians.shape[0],
-                size=self.da3_merge_max_points,
-                replace=False,
-            )
+            opacity_logit = merged_gaussians[:, 9]
+            opacity_score = 1.0 / (1.0 + np.exp(-np.clip(opacity_logit, -20.0, 20.0)))
+            keep_idx = np.argpartition(opacity_score, -self.da3_merge_max_points)[-self.da3_merge_max_points :]
+            keep_idx = np.sort(keep_idx)
             merged_gaussians = merged_gaussians[keep_idx]
+            logger.info(
+                "[INFO] DA3 merged gaussian downsampled by opacity: keep=%d / total=%d",
+                merged_gaussians.shape[0],
+                opacity_score.shape[0],
+            )
 
         out_path = os.path.join(self.da3_export_dir, self.da3_merge_output_name)
         self._write_gaussian_binary_ply(out_path, merged_gaussians)
@@ -1601,9 +1682,15 @@ def _build_parser(run_defaults):
         help="Set 1 to merge per-chunk DA3 gs_ply into one global pointcloud after chunk alignment",
     )
     parser.add_argument(
+        "--da3_chunk_max_points",
+        type=int,
+        default=int(run_defaults.get("da3_chunk_max_points", 2000000)),
+        help="Maximum points kept for each chunk gs_ply right after export; <=0 means keep all",
+    )
+    parser.add_argument(
         "--da3_merge_max_points",
         type=int,
-        default=int(run_defaults.get("da3_merge_max_points", 3000000)),
+        default=int(run_defaults.get("da3_merge_max_points", 8000000)),
         help="Maximum points kept in merged DA3 global pointcloud; <=0 means keep all",
     )
     parser.add_argument(

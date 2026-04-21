@@ -18,12 +18,13 @@ ENABLE_DA3_GS=1
 DA3_EXPORT_FORMAT="gs_ply"   # gs_ply / gs_video
 DA3_EXPORT_DIR="${OUTPUT_ROOT}/da3_gs_exports"
 MERGE_DA3_GS_POINTCLOUD=1
-DA3_MERGE_MAX_POINTS=0
+DA3_CHUNK_MAX_POINTS=2000000
+DA3_MERGE_MAX_POINTS=2000000
 DA3_MERGE_OUTPUT_NAME="da3_gs_merged_points.ply"
 
 # Optional: run all UrbanScene subsets
-# SCENES=('PolyTech' 'ArtSci' 'School' 'Bridge' 'Castle' 'Town')
-SCENES=('PolyTech')
+SCENES=('PolyTech' 'ArtSci' 'School' 'Bridge' 'Castle' 'Town')
+# SCENES=('PolyTech')
 
 for SCENE in "${SCENES[@]}"; do
     SCENE_PATH="$DATASET_PATH/${SCENE}"
@@ -53,7 +54,7 @@ for SCENE in "${SCENES[@]}"; do
         --da3_export_format "$DA3_EXPORT_FORMAT" \
         --da3_export_dir "${DA3_EXPORT_DIR}/${SCENE}" \
         --merge_da3_gs_pointcloud "$MERGE_DA3_GS_POINTCLOUD" \
+        --da3_chunk_max_points "$DA3_CHUNK_MAX_POINTS" \
         --da3_merge_max_points "$DA3_MERGE_MAX_POINTS" \
-        --da3_merge_output_name "$DA3_MERGE_OUTPUT_NAME" \
-        --max_chunks 3
+        --da3_merge_output_name "$DA3_MERGE_OUTPUT_NAME" 
 done
