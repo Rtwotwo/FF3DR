@@ -55,7 +55,7 @@
 
 
 # 2.download aerial part of big city about 206G
-SPLITS=('test')
+SPLITS=('train')
 for SPLIT in "${SPLITS[@]}"; do 
     if [ "$SPLIT" == 'test' ]; then
         CHUNKS=('big_high_block_1_test' 'big_high_block_2_test' 'big_high_block_3_test' 'big_high_block_4_test' 'big_high_block_5_test' 'big_high_block_6_test')
@@ -82,9 +82,9 @@ for SPLIT in "${SPLITS[@]}"; do
                     echo "[$(date)] Downloading ${SPLIT}/${CHUNK}/${PATCH}..."
                     # download the tar file and extract file
                     wget  https://hf-mirror.com/datasets/BoDai/MatrixCity/resolve/main/big_city/aerial/${SPLIT}/${PATCH}?download=true \
-                            -O ./dataset/MatrixCity/big_city/aerial/${SPLIT}/${CHUNK}/
-                    tar -xvf ./dataset/MatrixCity/big_city/aerial/${SPLIT}/${CHUNK}/${PATCH}.tar -C ./dataset/MatrixCity/big_city/aerial/${SPLIT}/${CHUNK}/
-                    rm ./dataset/MatrixCity/big_city/aerial/${SPLIT}/${CHUNK}/${PATCH}.tar
+                            -O ./dataset/MatrixCity/big_city/aerial/${SPLIT}/${PATCH}
+                    tar -xvf ./dataset/MatrixCity/big_city/aerial/${SPLIT}/${CHUNK}/${PATCH} -C ./dataset/MatrixCity/big_city/aerial/${SPLIT}/${CHUNK}/
+                    rm ./dataset/MatrixCity/big_city/aerial/${SPLIT}/${CHUNK}/${PATCH}
                 done
             elif [ "$CHUNK" != 'big_high_block_1' ]; then 
                 echo "[$(date)] Downloading ${SPLIT}/${CHUNK}..."
