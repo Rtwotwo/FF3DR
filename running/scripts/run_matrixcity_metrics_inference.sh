@@ -13,6 +13,9 @@ MODEL_NAME="depthanything3"
 ALIGN_MODE="median"
 BATCH_SIZE=8
 GPU_ID=4
+SCENE_NAME="small_city"
+VIEW_NAME="aerial"
+DEPTH_ROOT="${DATASET_PATH}/${SCENE_NAME}_depth/${VIEW_NAME}"
 
 if [[ "$TRAIN_TEST_SPLIT" == "train" ]]; then
     BLOCKS=('block_1' 'block_2' 'block_3' 'block_4' 'block_5' 'block_6' 'block_7' 'block_8' 'block_9' 'block_10')
@@ -29,12 +32,13 @@ for BLOCK in "${BLOCKS[@]}"; do
         --run_args_yaml "./configs/run_matrixcity_metric_inference.yaml" \
         --config_path "$CONFIG_PATH" \
         --dataset_path "$DATASET_PATH" \
-        --scene_name "small_city" \
-        --view_name "aerial" \
+        --scene_name "$SCENE_NAME" \
+        --view_name "$VIEW_NAME" \
         --split "$TRAIN_TEST_SPLIT" \
         --blocks "$BLOCK" \
         --batch_size "$BATCH_SIZE" \
         --align_mode "$ALIGN_MODE" \
         --model_name "$MODEL_NAME" \
+        --depth_root "$DEPTH_ROOT" \
         --output_path "./exp/matrixcity/metric_eval/${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${BLOCK}"
 done

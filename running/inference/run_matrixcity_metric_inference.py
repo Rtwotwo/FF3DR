@@ -291,12 +291,16 @@ class MetricInfer:
 		return index
 
 	def _candidate_depth_roots(self, split_root: Path, block_name: str, block_dir: Path) -> List[Path]:
+		block_name_depth = f"{block_name}_depth" if block_name and not block_name.endswith("_depth") else block_name
 		candidates = []
 		if self.depth_root is not None:
 			candidates.extend(
 				[
+					self.depth_root / block_name_depth,
 					self.depth_root / block_name,
+					self.depth_root / self.split / block_name_depth,
 					self.depth_root / self.split / block_name,
+					self.depth_root / self.scene_name / self.view_name / self.split / block_name_depth,
 					self.depth_root / self.scene_name / self.view_name / self.split / block_name,
 					self.depth_root,
 				]

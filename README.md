@@ -40,14 +40,5 @@ The simulated cameras were arranged following a typical oblique five-view camera
   <img src="assets/matrixcity_aera.jpg" alt="dataset_map">
 </div>
 
-### UrbanScene Dataset
-
-[UrbanScene3D](https://vcc.tech/UrbanScene3D) is a large-scale data platform designed for research on urban scene perception and reconstruction. UrbanScene3D contains over 128,000 high-resolution images covering 16 scenarios, including large real urban areas and synthetic cities, with a total area of 136 square kilometers. The dataset also features high-precision LiDAR scans and hundreds of image sets with diverse observation modalities, providing a comprehensive benchmark for designing and evaluating aerial path planning and 3D reconstruction algorithms. In addition, the dataset is built on the Unreal Engine and AirSim simulator, and is equipped with manually annotated unique instance labels for each building, supporting the generation of various types of data such as 2D depth maps, 2D/3D bounding boxes, and 3D point cloud/mesh segmentation. The simulator, equipped with a physics engine and lighting system, not only generates diverse data but also enables users to simulate cars and drones in proposed urban environments for future research.
-
-<div align="center">
-  <img src="assets/polytech.jpg" alt="dataset_map">
-  <img src="assets/artsci.jpg" alt="dataset_map">
-</div>
-
 ## ❤️ Thanks ❤️
 

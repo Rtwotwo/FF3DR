@@ -6,7 +6,7 @@ RunArgs:
   view_name: aerial
   split: test
   blocks: []
-  depth_root: null
+  depth_root: ./dataset/MatrixCity/small_city_depth/aerial
   mask_root: null
   depth_scale: 1000.0
   batch_size: 8
