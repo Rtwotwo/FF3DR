@@ -3,11 +3,15 @@ import copy
 import json
 import logging
 import os
+import struct
 import sys
 import time
 from pathlib import Path
 import numpy as np
 import torch
+from PIL import Image, ImageFile
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 from safetensors.torch import load_file
 
 
@@ -244,11 +248,34 @@ class FF3DR:
             f"Please set --block_name to process one block at a time. available_blocks={sorted(candidate_blocks)}"
         )
 
+    @staticmethod
+    def _is_valid_image(path: str) -> bool:
+        try:
+            file_size = os.path.getsize(path)
+            if file_size < 64:
+                return False
+            if path.lower().endswith(".png"):
+                with open(path, "rb") as f:
+                    header = f.read(8)
+                    if header[:8] != b"\x89PNG\r\n\x1a\n":
+                        return False
+                    f.seek(-12, 2)
+                    tail = f.read(12)
+                    if len(tail) < 12 or tail[4:] != b"IEND\xae\x42\x60\x82":
+                        return False
+            elif path.lower().endswith((".jpg", ".jpeg")):
+                with open(path, "rb") as f:
+                    header = f.read(3)
+                    if header[:2] != b"\xff\xd8":
+                        return False
+            return True
+        except (OSError, struct.error):
+            return False
+
     def _build_camera_index(self, area_path):
         if not os.path.isdir(area_path):
             raise RuntimeError(f"[ERROR] area_path not found: {area_path}")
 
-        # MatrixCity block data may be a flat image folder (single-view).
         direct_images = [
             os.path.join(area_path, f)
             for f in os.listdir(area_path)
@@ -256,7 +283,11 @@ class FF3DR:
         ]
         if len(direct_images) > 0:
             direct_images = sorted(direct_images)
-            return [area_path], {area_path: direct_images}
+            valid_images = [p for p in direct_images if self._is_valid_image(p)]
+            skipped = len(direct_images) - len(valid_images)
+            if skipped > 0:
+                logger.warning("[WARN] Skipped %d corrupted/truncated images in %s", skipped, area_path)
+            return [area_path], {area_path: valid_images}
 
         camera_dirs = [os.path.join(area_path, d) for d in os.listdir(area_path) if os.path.isdir(os.path.join(area_path, d))]
         camera_dirs = sorted(camera_dirs, key=self._camera_sort_key)
@@ -270,9 +301,13 @@ class FF3DR:
                 if f.lower().endswith((".png", ".jpg", ".jpeg"))
             ]
             files = sorted(files)
-            if len(files) == 0:
+            valid_files = [p for p in files if self._is_valid_image(p)]
+            skipped = len(files) - len(valid_files)
+            if skipped > 0:
+                logger.warning("[WARN] Skipped %d corrupted/truncated images in %s", skipped, cam_dir)
+            if len(valid_files) == 0:
                 logger.warning("[WARN] Empty camera folder: %s", cam_dir)
-            image_paths[cam_dir] = files
+            image_paths[cam_dir] = valid_files
         return camera_dirs, image_paths
 
     def _load_model(self):

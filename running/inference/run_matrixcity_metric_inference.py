@@ -201,7 +201,15 @@ class MetricInfer:
 		self.view_name = view_name
 		self.split = split
 		self.blocks = blocks
-		self.depth_root = Path(depth_root) if depth_root else None
+		if depth_root is not None:
+			self.depth_root = Path(depth_root)
+		else:
+			auto_depth = self.dataset_path / f"{scene_name}_depth" / view_name
+			if auto_depth.is_dir():
+				self.depth_root = auto_depth
+				logger.info("[INFO] Auto-derived depth_root: %s", self.depth_root)
+			else:
+				self.depth_root = None
 		self.mask_root = Path(mask_root) if mask_root else None
 		self.batch_size = max(1, int(batch_size))
 		self.align_mode = align_mode

@@ -1,0 +1,24 @@
+RunArgs:
+  dataset_path: ./dataset/MatrixCity
+  city_size: small_city
+  train_test_split: train
+  model_path: ./weights/lingbot-map/lingbot-map-long.pt
+  output_path: ./exp/matrixcity/run_matrixcity_lingbotmap
+  mode: windowed
+  image_size: 518
+  patch_size: 14
+  enable_3d_rope: true
+  max_frame_num: 1024
+  num_scale_frames: 8
+  keyframe_interval: null
+  kv_cache_sliding_window: 64
+  camera_num_iterations: 4
+  use_sdpa: false
+  compile: false
+  offload_to_cpu: true
+  window_size: 32
+  overlap_size: 8
+  conf_threshold_coef: 0.75
+  sample_ratio: 0.015
+  save_glb: false
+  no_vis: true

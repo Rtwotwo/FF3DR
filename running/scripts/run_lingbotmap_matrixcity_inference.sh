@@ -1,26 +1,26 @@
 #!/bin/bash
-# MatrixCity single-view inference launcher (one block per run).
-# Supports both small_city and big_city.
+# LingBot-MAP MatrixCity inference launcher (one block per run).
+# Supports both big_city and small_city.
 #
 # Args (edit below):
-#   DATASET_PATH    : root of MatrixCity dataset
-#   MODEL_NAME      : depthanything3 / mapanything / pi3 / vggt
-#   CITY_SIZE       : small_city / big_city
-#   TRAIN_TEST_SPLIT: train / test
-#   GPU_ID          : CUDA visible device id
-#   CHUNK_SIZE      : frames per chunk
-#   OVERLAP         : overlap between chunks
+#   DATASET_PATH : root of MatrixCity dataset
+#   MODEL_PATH   : path to lingbot-map checkpoint (.pt)
+#   CITY_SIZE    : small_city / big_city
+#   TRAIN_TEST_SPLIT : train / test
+#   GPU_ID       : CUDA visible device id
+#   MODE         : streaming / windowed
 
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/MatrixCity"
-MODEL_NAME="depthanything3"
+MODEL_PATH="/data2/dataset/Redal/work_feedforward_3drepo/weights/lingbot-map/lingbot-map-long.pt"
 CITY_SIZE="big_city"
 TRAIN_TEST_SPLIT="train"
-GPU_ID=6
-CHUNK_SIZE=60
-OVERLAP=24
+GPU_ID=0
+MODE="streaming"
+WINDOW_SIZE=32
+OVERLAP_SIZE=8
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-INFERENCE_SCRIPT="${SCRIPT_DIR}/../inference/run_matrixcity_inference.py"
+INFERENCE_SCRIPT="${SCRIPT_DIR}/../inference/run_lingbotmap_matrixcity_inference.py"
 
 if [ "$CITY_SIZE" == "small_city" ]; then
     if [ "$TRAIN_TEST_SPLIT" == "train" ]; then
@@ -46,31 +46,35 @@ else
 fi
 
 echo "=============================================="
-echo " MatrixCity Inference"
-echo " Model: ${MODEL_NAME}"
+echo " LingBot-MAP MatrixCity Inference"
 echo " City: ${CITY_SIZE}"
 echo " Split: ${TRAIN_TEST_SPLIT}"
 echo " Blocks: ${BLOCKS[*]}"
-echo " Chunk: ${CHUNK_SIZE}, Overlap: ${OVERLAP}"
+echo " Mode: ${MODE}"
+echo " Window: ${WINDOW_SIZE}, Overlap: ${OVERLAP_SIZE}"
 echo " GPU: ${GPU_ID}"
+echo " Model: ${MODEL_PATH}"
 echo "=============================================="
 
 for BLOCK in "${BLOCKS[@]}"; do
-    AREA_PATH="${DATASET_PATH}/${CITY_SIZE}/aerial/${TRAIN_TEST_SPLIT}/${BLOCK}/"
-    OUTPUT_PATH="./exp/matrixcity/run_matrixcity_${MODEL_NAME}_${CITY_SIZE}_${TRAIN_TEST_SPLIT}_${BLOCK}"
+    IMAGE_FOLDER="${DATASET_PATH}/${CITY_SIZE}/aerial/${TRAIN_TEST_SPLIT}/${BLOCK}/"
+    OUTPUT_PATH="./exp/matrixcity/run_matrixcity_lingbotmap_${CITY_SIZE}_${TRAIN_TEST_SPLIT}_${BLOCK}"
 
-    if [ ! -d "$AREA_PATH" ]; then
-        echo "[WARN $(date +"%Y-%m-%d %H:%M:%S")] Area path not found, skipping: ${AREA_PATH}"
+    if [ ! -d "$IMAGE_FOLDER" ]; then
+        echo "[WARN $(date +"%Y-%m-%d %H:%M:%S")] Image folder not found, skipping: ${IMAGE_FOLDER}"
         continue
     fi
 
     echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${CITY_SIZE}/${TRAIN_TEST_SPLIT}/${BLOCK}..."
     CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$INFERENCE_SCRIPT" \
-        --area_path "$AREA_PATH" \
+        --model_path "$MODEL_PATH" \
+        --image_folder "$IMAGE_FOLDER" \
         --output_path "$OUTPUT_PATH" \
-        --model_name "$MODEL_NAME" \
-        --chunk_size "$CHUNK_SIZE" \
-        --overlap "$OVERLAP"
+        --mode "$MODE" \
+        --window_size "$WINDOW_SIZE" \
+        --overlap_size "$OVERLAP_SIZE" \
+        --no_vis \
+        --offload_to_cpu
     echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Finished: ${BLOCK}"
     echo ""
 done

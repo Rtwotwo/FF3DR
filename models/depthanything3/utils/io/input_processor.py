@@ -26,7 +26,9 @@ import cv2
 import numpy as np
 import torch
 import torchvision.transforms as T
-from PIL import Image
+from PIL import Image, ImageFile
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from depth_anything_3.utils.logger import logger
 from depth_anything_3.utils.parallel_utils import parallel_execution
@@ -297,9 +299,12 @@ class InputProcessor:
     # -----------------------------
     def _load_image(self, img: np.ndarray | Image.Image | str) -> Image.Image:
         if isinstance(img, str):
-            return Image.open(img).convert("RGB")
+            try:
+                return Image.open(img).convert("RGB")
+            except OSError as e:
+                logger.warning("[WARN] Failed to load image %s: %s", img, e)
+                raise
         elif isinstance(img, np.ndarray):
-            # Assume HxWxC uint8/RGB
             return Image.fromarray(img).convert("RGB")
         elif isinstance(img, Image.Image):
             return img.convert("RGB")
