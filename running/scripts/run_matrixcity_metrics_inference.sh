@@ -18,7 +18,7 @@ CITY_SIZE="big_city"
 TRAIN_TEST_SPLIT="test"
 ALIGN_MODE="median"
 BATCH_SIZE=8
-GPU_ID=4
+GPU_ID=0
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INFERENCE_SCRIPT="${SCRIPT_DIR}/../inference/run_matrixcity_metric_inference.py"
