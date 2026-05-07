@@ -18,13 +18,9 @@ TRAIN_TEST_SPLIT="train"
 GPU_ID=6
 CHUNK_SIZE=60
 OVERLAP=24
-ENABLE_GLOBAL_MERGE=1
-USE_ICP_FALLBACK=1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INFERENCE_SCRIPT="${SCRIPT_DIR}/../inference/run_matrixcity_inference.py"
-MERGE_SCRIPT="${SCRIPT_DIR}/../inference/run_matrixcity_global_merge.py"
-BASE_OUTPUT_DIR="./exp/matrixcity"
 
 if [ "$CITY_SIZE" == "small_city" ]; then
     if [ "$TRAIN_TEST_SPLIT" == "train" ]; then
@@ -80,23 +76,3 @@ for BLOCK in "${BLOCKS[@]}"; do
 done
 
 echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] All blocks done."
-
-if [ "$ENABLE_GLOBAL_MERGE" -eq 1 ]; then
-    echo ""
-    echo "=============================================="
-    echo " Cross-Block Global Alignment & Merging"
-    echo "=============================================="
-    GLOBAL_OUTPUT="${BASE_OUTPUT_DIR}/global_merge_${MODEL_NAME}_${CITY_SIZE}_${TRAIN_TEST_SPLIT}"
-    echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running global merge..."
-    CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$MERGE_SCRIPT" \
-        --base_output_dir "$BASE_OUTPUT_DIR" \
-        --city_size "$CITY_SIZE" \
-        --split "$TRAIN_TEST_SPLIT" \
-        --model_name "$MODEL_NAME" \
-        --output_path "$GLOBAL_OUTPUT" \
-        --use_icp_fallback "$USE_ICP_FALLBACK" \
-        --dataset_path "$DATASET_PATH"
-    echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Global merge finished: ${GLOBAL_OUTPUT}/reconstruction_global.ply"
-else
-    echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Global merge skipped (ENABLE_GLOBAL_MERGE=0)"
-fi

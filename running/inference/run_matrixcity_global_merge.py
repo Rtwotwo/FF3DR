@@ -50,192 +50,75 @@ def discover_block_outputs(base_output_dir, city_size, split, model_name):
     return blocks
 
 
-def _load_ply_as_array(ply_path):
-    try:
-        import open3d as o3d
-        pcd = o3d.io.read_point_cloud(ply_path)
-        pts = np.asarray(pcd.points, dtype=np.float32)
-        colors = np.asarray(pcd.colors, dtype=np.float32)
-        if colors.ndim == 2 and colors.shape[1] == 3:
-            colors = (colors * 255.0).clip(0, 255).astype(np.uint8)
-        else:
-            colors = None
-        return pts, colors
-    except ImportError:
-        pass
-    try:
-        import trimesh
-        mesh = trimesh.load(ply_path)
-        pts = np.asarray(mesh.vertices, dtype=np.float32)
-        colors = None
-        if hasattr(mesh, "visual") and hasattr(mesh.visual, "vertex_colors"):
-            vc = np.asarray(mesh.visual.vertex_colors, dtype=np.float32)
-            if vc.ndim == 2 and vc.shape[1] >= 3:
-                colors = (vc[:, :3] * 255.0).clip(0, 255).astype(np.uint8)
-        return pts, colors
-    except ImportError:
-        pass
-    pts_list = []
-    colors_list = []
-    with open(ply_path, "rb") as f:
-        header = b""
-        num_verts = 0
-        has_color = False
-        while True:
-            line = f.readline()
-            header += line
-            if line.strip() == b"end_header":
-                break
-            if line.startswith(b"element vertex"):
-                num_verts = int(line.split()[2])
-            if b"red" in line.lower() or b"green" in line.lower():
-                has_color = True
-        for _ in range(num_verts):
-            vals = f.readline().decode("ascii", errors="replace").strip().split()
-            if len(vals) >= 3:
-                pts_list.append([float(vals[0]), float(vals[1]), float(vals[2])])
-                if has_color and len(vals) >= 6:
-                    colors_list.append([int(vals[3]), int(vals[4]), int(vals[5])])
-    pts = np.array(pts_list, dtype=np.float32)
-    colors = np.array(colors_list, dtype=np.uint8) if colors_list else None
-    return pts, colors
-
-
 def load_block_point_data(block_info, max_chunks=None):
     aligned_dir = os.path.join(block_info["output_dir"], "tmp_predictions_aligned")
-    pcd_dir = os.path.join(block_info["output_dir"], "tmp_predictions_pcd")
-
-    if os.path.isdir(aligned_dir):
-        chunk_files = sorted(glob.glob(os.path.join(aligned_dir, "chunk_*.npy")))
-        if len(chunk_files) > 0:
-            if max_chunks is not None and max_chunks > 0:
-                chunk_files = chunk_files[:max_chunks]
-            all_points = []
-            all_conf = []
-            all_colors = []
-            for cf in chunk_files:
-                try:
-                    data = np.load(cf, allow_pickle=True).item()
-                    wp = data.get("world_points", None)
-                    cf_val = data.get("conf", None)
-                    img = data.get("images", None)
-                    if wp is None or cf_val is None:
-                        continue
-                    all_points.append(wp)
-                    all_conf.append(cf_val)
-                    if img is not None:
-                        if img.dtype != np.uint8:
-                            if np.max(img) <= 1.0:
-                                img = (img * 255.0).clip(0, 255).astype(np.uint8)
-                            else:
-                                img = img.clip(0, 255).astype(np.uint8)
-                        all_colors.append(img)
-                except Exception as e:
-                    logger.warning("[WARN] Failed to load %s: %s", cf, str(e))
-            if len(all_points) > 0:
-                return {
-                    "world_points": np.concatenate(all_points, axis=0),
-                    "conf": np.concatenate(all_conf, axis=0),
-                    "images": np.concatenate(all_colors, axis=0) if all_colors else None,
-                    "source": "npy",
-                }
-
-    if os.path.isdir(pcd_dir):
-        ply_files = sorted(glob.glob(os.path.join(pcd_dir, "*_pcd.ply")))
-        if len(ply_files) > 0:
-            logger.info("[INFO] Loading block %s from PLY files (%d files)", block_info["name"], len(ply_files))
-            all_pts = []
-            all_colors = []
-            for pf in ply_files:
-                try:
-                    pts, colors = _load_ply_as_array(pf)
-                    if pts is not None and len(pts) > 0:
-                        all_pts.append(pts)
-                        if colors is not None:
-                            all_colors.append(colors)
-                except Exception as e:
-                    logger.warning("[WARN] Failed to load PLY %s: %s", pf, str(e))
-            if len(all_pts) > 0:
-                pts = np.concatenate(all_pts, axis=0)
-                colors = np.concatenate(all_colors, axis=0) if all_colors else None
-                conf = np.ones(pts.shape[:-1] if pts.ndim > 1 else (pts.shape[0],), dtype=np.float32)
-                return {"world_points": pts, "conf": conf, "images": colors, "source": "ply"}
-
-    logger.warning("[WARN] No point data found for block %s", block_info["name"])
-    return None
+    if not os.path.isdir(aligned_dir):
+        logger.warning("[WARN] No aligned data in %s", block_info["output_dir"])
+        return None
+    chunk_files = sorted(glob.glob(os.path.join(aligned_dir, "chunk_*.npy")))
+    if max_chunks is not None and max_chunks > 0:
+        chunk_files = chunk_files[:max_chunks]
+    all_points = []
+    all_conf = []
+    all_colors = []
+    for cf in chunk_files:
+        try:
+            data = np.load(cf, allow_pickle=True).item()
+            wp = data.get("world_points", None)
+            cf_val = data.get("conf", None)
+            img = data.get("images", None)
+            if wp is None or cf_val is None:
+                continue
+            all_points.append(wp)
+            all_conf.append(cf_val)
+            if img is not None:
+                if img.dtype != np.uint8:
+                    if np.max(img) <= 1.0:
+                        img = (img * 255.0).clip(0, 255).astype(np.uint8)
+                    else:
+                        img = img.clip(0, 255).astype(np.uint8)
+                all_colors.append(img)
+        except Exception as e:
+            logger.warning("[WARN] Failed to load %s: %s", cf, str(e))
+    if len(all_points) == 0:
+        return None
+    return {
+        "world_points": np.concatenate(all_points, axis=0),
+        "conf": np.concatenate(all_conf, axis=0),
+        "images": np.concatenate(all_colors, axis=0) if all_colors else None,
+    }
 
 
-def extract_block_descriptors(block_info, config, sample_stride=10, dataset_path=None, city_size=None, split=None):
+def extract_block_descriptors(block_info, config, sample_stride=10):
     from PIL import Image as PILImage
     image_cache_dir = os.path.join(block_info["output_dir"], "block_images_for_vpr")
-    if not os.path.isdir(image_cache_dir) or not os.listdir(image_cache_dir):
+    if not os.path.isdir(image_cache_dir):
         os.makedirs(image_cache_dir, exist_ok=True)
-        extracted = False
         unaligned_dir = os.path.join(block_info["output_dir"], "tmp_predictions_unaligned")
-        if os.path.isdir(unaligned_dir):
-            chunk_files = sorted(glob.glob(os.path.join(unaligned_dir, "chunk_*.npy")))
-            count = 0
-            for cf in chunk_files:
-                try:
-                    data = np.load(cf, allow_pickle=True).item()
-                    imgs = data.get("processed_images", data.get("images", None))
-                    if imgs is None:
-                        continue
-                    if imgs.ndim == 4:
-                        for i in range(0, imgs.shape[0], sample_stride):
-                            img = imgs[i]
-                            if img.dtype != np.uint8:
-                                img = img.clip(0, 255).astype(np.uint8)
-                            PILImage.fromarray(img).save(
-                                os.path.join(image_cache_dir, "frame_{:06d}.png".format(count))
-                            )
-                            count += 1
-                    extracted = True
-                except Exception as e:
-                    logger.warning("[WARN] Failed to extract images from %s: %s", cf, str(e))
-        if not extracted and dataset_path and city_size and split:
-            block_name = block_info["name"]
-            area_path = os.path.join(dataset_path, city_size, "aerial", split, block_name)
-            if os.path.isdir(area_path):
-                cam_dirs = sorted([
-                    d for d in os.listdir(area_path)
-                    if os.path.isdir(os.path.join(area_path, d)) and d.isdigit()
-                ])
-                count = 0
-                if len(cam_dirs) > 0:
-                    for cam_dir in cam_dirs:
-                        cam_path = os.path.join(area_path, cam_dir)
-                        img_files = sorted(glob.glob(os.path.join(cam_path, "*.png")) + glob.glob(os.path.join(cam_path, "*.jpg")))
-                        for i in range(0, len(img_files), sample_stride):
-                            try:
-                                img = PILImage.open(img_files[i]).convert("RGB")
-                                img = img.resize((224, 224))
-                                img.save(os.path.join(image_cache_dir, "frame_{:06d}.png".format(count)))
-                                count += 1
-                            except Exception as e:
-                                logger.warning("[WARN] Failed to load image %s: %s", img_files[i], str(e))
-                        if count > 0:
-                            break
-                else:
-                    img_files = sorted(glob.glob(os.path.join(area_path, "*.png")) + glob.glob(os.path.join(area_path, "*.jpg")))
-                    for i in range(0, len(img_files), sample_stride):
-                        try:
-                            img = PILImage.open(img_files[i]).convert("RGB")
-                            img = img.resize((224, 224))
-                            img.save(os.path.join(image_cache_dir, "frame_{:06d}.png".format(count)))
-                            count += 1
-                        except Exception as e:
-                            logger.warning("[WARN] Failed to load image %s: %s", img_files[i], str(e))
-    if not os.path.isdir(image_cache_dir) or not os.listdir(image_cache_dir):
+        chunk_files = sorted(glob.glob(os.path.join(unaligned_dir, "chunk_*.npy")))
+        count = 0
+        for cf in chunk_files:
+            try:
+                data = np.load(cf, allow_pickle=True).item()
+                imgs = data.get("processed_images", data.get("images", None))
+                if imgs is None:
+                    continue
+                if imgs.ndim == 4:
+                    for i in range(0, imgs.shape[0], sample_stride):
+                        img = imgs[i]
+                        if img.dtype != np.uint8:
+                            img = img.clip(0, 255).astype(np.uint8)
+                        PILImage.fromarray(img).save(
+                            os.path.join(image_cache_dir, "frame_{:06d}.png".format(count))
+                        )
+                        count += 1
+            except Exception as e:
+                logger.warning("[WARN] Failed to extract images from %s: %s", cf, str(e))
+    if not os.listdir(image_cache_dir):
         logger.warning("[WARN] No images extracted for VPR in block %s", block_info["name"])
         return None, []
     detector = LoopDetector(image_cache_dir, config=config)
-    try:
-        detector.load_model()
-    except Exception as e:
-        logger.warning("[WARN] Failed to load SALAD model (network or cache issue): %s", str(e))
-        logger.warning("[WARN] Falling back to ICP-only alignment for this block")
-        return None, []
+    detector.load_model()
     detector.get_image_paths()
     if len(detector.image_paths) == 0:
         return None, []
@@ -294,12 +177,12 @@ def compute_block_transform_via_points(block_i_data, block_j_data, config):
     conf_map_i = conf_i[-tail_n:]
     point_map_j = pts_j[:tail_n]
     conf_map_j = conf_j[:tail_n:]
-    if point_map_i.ndim == 2:
-        point_map_i = point_map_i[np.newaxis, ..., np.newaxis, :]
-        conf_map_i = conf_map_i[np.newaxis, ..., np.newaxis]
-    if point_map_j.ndim == 2:
-        point_map_j = point_map_j[np.newaxis, ..., np.newaxis, :]
-        conf_map_j = conf_map_j[np.newaxis, ..., np.newaxis]
+    if point_map_i.ndim == 3:
+        point_map_i = point_map_i[np.newaxis, ...]
+        conf_map_i = conf_map_i[np.newaxis, ...]
+    if point_map_j.ndim == 3:
+        point_map_j = point_map_j[np.newaxis, ...]
+        conf_map_j = conf_map_j[np.newaxis, ...]
     try:
         conf_threshold = min(np.median(conf_i), np.median(conf_j)) * 0.1
         s, R, t = weighted_align_point_maps(
@@ -326,8 +209,8 @@ def compute_block_transform_via_icp(block_i_data, block_j_data, config, voxel_si
     conf_i = block_i_data["conf"].reshape(-1)
     pts_j = block_j_data["world_points"].reshape(-1, 3).astype(np.float64)
     conf_j = block_j_data["conf"].reshape(-1)
-    conf_thresh_i = np.mean(conf_i) * 0.5
-    conf_thresh_j = np.mean(conf_j) * 0.5
+    conf_thresh_i = np.mean(conf_i) * 0.75
+    conf_thresh_j = np.mean(conf_j) * 0.75
     mask_i = conf_i > conf_thresh_i
     mask_j = conf_j > conf_thresh_j
     pts_i_valid = pts_i[mask_i]
@@ -344,64 +227,23 @@ def compute_block_transform_via_icp(block_i_data, block_j_data, config, voxel_si
     pcd_j.points = o3d.utility.Vector3dVector(pts_j_valid)
     pcd_i = pcd_i.voxel_down_sample(voxel_size)
     pcd_j = pcd_j.voxel_down_sample(voxel_size)
-    center_i = np.asarray(pcd_i.points).mean(axis=0)
-    center_j = np.asarray(pcd_j.points).mean(axis=0)
-    scale_i = float(np.std(np.asarray(pcd_i.points) - center_i))
-    scale_j = float(np.std(np.asarray(pcd_j.points) - center_j))
-
-    best_result = None
-    best_fitness = -1.0
-
-    init_transforms = []
+    center_i = pcd_i.get_center()
+    center_j = pcd_j.get_center()
     init_translate = center_i - center_j
-    T1 = np.eye(4)
-    T1[:3, 3] = init_translate
-    init_transforms.append(T1)
-
-    s_est = scale_i / max(scale_j, 1e-6)
-    T2 = np.eye(4)
-    T2[:3, :3] *= s_est
-    T2[:3, 3] = init_translate
-    init_transforms.append(T2)
-
-    for rot_angle in [0, 90, 180, 270]:
-        angle_rad = np.radians(rot_angle)
-        for axis_idx in range(3):
-            axis = np.zeros(3)
-            axis[axis_idx] = 1.0
-            c, s_val = np.cos(angle_rad), np.sin(angle_rad)
-            K = np.array([
-                [0, -axis[2], axis[1]],
-                [axis[2], 0, -axis[0]],
-                [-axis[1], axis[0], 0],
-            ])
-            R_rot = np.eye(3) * c + (1 - c) * np.outer(axis, axis) + s_val * K
-            T_try = np.eye(4)
-            T_try[:3, :3] = R_rot * s_est
-            T_try[:3, 3] = init_translate
-            init_transforms.append(T_try)
-
-    for init_T in init_transforms:
-        try:
-            result = o3d.pipelines.registration.registration_icp(
-                pcd_j, pcd_i,
-                max_correspondence_distance=voxel_size * 10,
-                init=init_T,
-                criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30),
-            )
-            if result.fitness > best_fitness:
-                best_fitness = result.fitness
-                best_result = result
-        except Exception:
-            continue
-
-    if best_result is None or best_result.fitness < 0.05:
-        logger.warning("[WARN] ICP fitness too low, skipping")
+    initial_transform = np.eye(4)
+    initial_transform[:3, 3] = init_translate
+    logger.info("[INFO] Running ICP with initial translation: [%.2f, %.2f, %.2f]", *init_translate)
+    result = o3d.pipelines.registration.registration_icp(
+        pcd_j, pcd_i,
+        max_correspondence_distance=voxel_size * 5,
+        init=initial_transform,
+        criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iter),
+    )
+    logger.info("[INFO] ICP result: fitness=%.4f, rmse=%.4f", result.fitness, result.inlier_rmse)
+    if result.fitness < 0.1:
+        logger.warning("[WARN] ICP fitness too low (%.4f), skipping", result.fitness)
         return None
-
-    logger.info("[INFO] ICP result: fitness=%.4f, rmse=%.4f", best_result.fitness, best_result.inlier_rmse)
-
-    T = best_result.transformation
+    T = result.transformation
     R = T[:3, :3].astype(np.float32)
     t = T[:3, 3].astype(np.float32)
     U, _, Vt = np.linalg.svd(R)
@@ -409,8 +251,10 @@ def compute_block_transform_via_icp(block_i_data, block_j_data, config, voxel_si
     if np.linalg.det(R_clean) < 0:
         Vt[2, :] *= -1
         R_clean = (U @ Vt).astype(np.float32)
+    scale_i = np.std(pts_i_valid - center_i)
+    scale_j = np.std(pts_j_valid - center_j)
     s = float(scale_i / max(scale_j, 1e-6))
-    return s, R_clean, t, float(best_result.inlier_rmse)
+    return s, R_clean, t, float(result.inlier_rmse)
 
 
 def build_spanning_tree(block_pairs, num_blocks):
@@ -444,7 +288,7 @@ def build_spanning_tree(block_pairs, num_blocks):
     return tree_edges
 
 
-def global_merge_blocks(blocks, block_data_list, config, output_path, use_icp_fallback=True, dataset_path=None, city_size=None, split=None):
+def global_merge_blocks(blocks, block_data_list, config, output_path, use_icp_fallback=True):
     num_blocks = len(blocks)
     if num_blocks == 0:
         logger.error("[ERROR] No blocks to merge")
@@ -462,7 +306,7 @@ def global_merge_blocks(blocks, block_data_list, config, output_path, use_icp_fa
     detectors_info = []
     for idx, blk in enumerate(blocks):
         logger.info("[INFO]   Extracting descriptors for block %d: %s", idx, blk["name"])
-        desc, img_paths = extract_block_descriptors(blk, config, sample_stride=10, dataset_path=dataset_path, city_size=city_size, split=split)
+        desc, img_paths = extract_block_descriptors(blk, config, sample_stride=10)
         detectors_info.append({"descriptors": desc, "image_paths": img_paths})
 
     logger.info("[INFO] Step 2/4: Finding cross-block image matches...")
@@ -472,13 +316,12 @@ def global_merge_blocks(blocks, block_data_list, config, output_path, use_icp_fa
     if len(block_pairs) == 0:
         logger.warning("[WARN] No cross-block matches found via SALAD!")
         if use_icp_fallback:
-            logger.info("[INFO] Falling back to ICP-based alignment for all block pairs...")
-            for i in range(num_blocks):
-                for j in range(i + 1, num_blocks):
-                    block_pairs.append({
-                        "block_i": i, "block_j": j,
-                        "matches": [], "avg_similarity": 0.0, "num_matches": 0,
-                    })
+            logger.info("[INFO] Falling back to ICP-based alignment between adjacent blocks...")
+            for i in range(num_blocks - 1):
+                block_pairs.append({
+                    "block_i": i, "block_j": i + 1,
+                    "matches": [], "avg_similarity": 0.0, "num_matches": 0,
+                })
         else:
             logger.error("[ERROR] Cannot align blocks without matches. Exiting.")
             return
@@ -487,15 +330,11 @@ def global_merge_blocks(blocks, block_data_list, config, output_path, use_icp_fa
     for bp in block_pairs:
         i, j = bp["block_i"], bp["block_j"]
         logger.info("[INFO]   Aligning block_%d <-> block_%d ...", i, j)
-        src_i = block_data_list[i].get("source", "npy") if block_data_list[i] else "npy"
-        src_j = block_data_list[j].get("source", "npy") if block_data_list[j] else "npy"
-        result = None
-        if src_i == "npy" and src_j == "npy":
-            result = compute_block_transform_via_points(
-                block_data_list[i], block_data_list[j], config
-            )
+        result = compute_block_transform_via_points(
+            block_data_list[i], block_data_list[j], config
+        )
         if result is None and use_icp_fallback:
-            logger.info("[INFO]   Trying ICP alignment...")
+            logger.info("[INFO]   Point-based alignment failed, trying ICP...")
             result = compute_block_transform_via_icp(
                 block_data_list[i], block_data_list[j], config
             )
@@ -566,12 +405,7 @@ def global_merge_blocks(blocks, block_data_list, config, output_path, use_icp_fa
         world_points = data["world_points"]
         confs = data["conf"]
         colors = data["images"]
-        needs_reshape = world_points.ndim == 2
-        if needs_reshape:
-            world_points = world_points[np.newaxis, ..., np.newaxis, :]
         world_points = apply_sim3_direct_torch(world_points, s, R, t)
-        if needs_reshape:
-            world_points = world_points.reshape(-1, 3)
         conf_threshold = np.mean(confs) * config["Model"]["Pointcloud_Save"]["conf_threshold_coef"]
         ply_path = os.path.join(global_pcd_dir, "block_{}_pcd.ply".format(idx))
         save_confident_pointcloud_batch(
@@ -613,17 +447,49 @@ def main():
     parser.add_argument("--config_path", type=str,
                         default=str(_REPO_ROOT / "configs" / "base_config.yaml"),
                         help="Base config path")
-    parser.add_argument("--use_icp_fallback", type=int, default=1,
-                        help="Use ICP as fallback when SALAD matching fails")
+    parser.add_argument("--run_args_yaml", type=str, default="",
+                        help="YAML config with GlobalMerge section (overrides defaults)")
+    parser.add_argument("--use_icp_fallback", type=int, default=-1,
+                        help="Use ICP as fallback when SALAD matching fails (-1=from config)")
     parser.add_argument("--max_chunks_per_block", type=int, default=-1,
                         help="Max chunks to load per block (-1=all)")
-    parser.add_argument("--dataset_path", type=str,
-                        default=str(_REPO_ROOT / "dataset" / "MatrixCity"),
-                        help="Root of MatrixCity dataset for VPR image extraction")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     config = load_config(args.config_path)
+
+    if args.run_args_yaml and os.path.isfile(args.run_args_yaml):
+        run_config = load_config(args.run_args_yaml)
+        gm = run_config.get("GlobalMerge", {})
+        if args.base_output_dir == str(_REPO_ROOT / "exp" / "matrixcity") and gm.get("base_output_dir"):
+            args.base_output_dir = gm["base_output_dir"]
+        if args.city_size == "big_city" and gm.get("city_size"):
+            args.city_size = gm["city_size"]
+        if args.split == "train" and gm.get("split"):
+            args.split = gm["split"]
+        if args.model_name == "depthanything3" and gm.get("model_name"):
+            args.model_name = gm["model_name"]
+        if not args.output_path and gm.get("output_path"):
+            args.output_path = gm["output_path"]
+        if gm.get("config_path"):
+            config = load_config(gm["config_path"])
+        if args.use_icp_fallback == -1 and "use_icp_fallback" in gm:
+            args.use_icp_fallback = int(gm["use_icp_fallback"])
+        if args.max_chunks_per_block == -1 and "max_chunks_per_block" in gm:
+            args.max_chunks_per_block = int(gm["max_chunks_per_block"])
+        icp_cfg = gm.get("ICP", {})
+        for k, v in icp_cfg.items():
+            config.setdefault("GlobalMerge", {}).setdefault("ICP", {})[k] = v
+        salad_cfg = gm.get("SALAD", {})
+        for k, v in salad_cfg.items():
+            config.setdefault("GlobalMerge", {}).setdefault("SALAD", {})[k] = v
+        pc_cfg = gm.get("Pointcloud_Save", {})
+        for k, v in pc_cfg.items():
+            config["Model"]["Pointcloud_Save"][k] = v
+        logger.info("[INFO] Loaded run config from %s", args.run_args_yaml)
+
+    if args.use_icp_fallback == -1:
+        args.use_icp_fallback = 1
 
     if not args.output_path:
         args.output_path = os.path.join(
@@ -655,7 +521,6 @@ def main():
     global_merge_blocks(
         blocks, block_data_list, config, args.output_path,
         use_icp_fallback=bool(args.use_icp_fallback),
-        dataset_path=args.dataset_path, city_size=args.city_size, split=args.split,
     )
 
 
