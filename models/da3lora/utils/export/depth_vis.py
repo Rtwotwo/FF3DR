@@ -16,8 +16,8 @@ import os
 import imageio
 import numpy as np
 
-from depth_anything_3.specs import Prediction
-from depth_anything_3.utils.visualize import visualize_depth
+from da3lora.specs import Prediction
+from da3lora.utils.visualize import visualize_depth
 
 
 def export_to_depth_vis(

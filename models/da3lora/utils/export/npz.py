@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,8 +16,8 @@
 import os
 import numpy as np
 
-from depth_anything_3.specs import Prediction
-from depth_anything_3.utils.parallel_utils import async_call
+from da3lora.specs import Prediction
+from da3lora.utils.parallel_utils import async_call
 
 
 @async_call

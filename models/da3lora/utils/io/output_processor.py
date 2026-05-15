@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,7 +26,7 @@ import numpy as np
 import torch
 from addict import Dict as AddictDict
 
-from depth_anything_3.specs import Prediction
+from da3lora.specs import Prediction
 
 
 class OutputProcessor:

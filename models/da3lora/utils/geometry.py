@@ -1,3 +1,4 @@
+from __future__ import annotations
 # flake8: noqa: F722
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #

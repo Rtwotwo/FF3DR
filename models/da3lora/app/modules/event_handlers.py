@@ -26,10 +26,10 @@ import gradio as gr
 import numpy as np
 import torch
 
-from depth_anything_3.app.modules.file_handlers import FileHandler
-from depth_anything_3.app.modules.model_inference import ModelInference
-from depth_anything_3.utils.memory import cleanup_cuda_memory
-from depth_anything_3.app.modules.visualization import VisualizationHandler
+from da3lora.app.modules.file_handlers import FileHandler
+from da3lora.app.modules.model_inference import ModelInference
+from da3lora.utils.memory import cleanup_cuda_memory
+from da3lora.app.modules.visualization import VisualizationHandler
 
 
 class EventHandlers:

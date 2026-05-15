@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,11 +18,11 @@ import torch
 from einops import einsum, rearrange, repeat
 from torch import nn
 
-from depth_anything_3.model.utils.transform import cam_quat_xyzw_to_world_quat_wxyz
-from depth_anything_3.specs import Gaussians
-from depth_anything_3.utils.geometry import affine_inverse, get_world_rays, sample_image_grid
-from depth_anything_3.utils.pose_align import batch_align_poses_umeyama
-from depth_anything_3.utils.sh_helpers import rotate_sh
+from da3lora.model.utils.transform import cam_quat_xyzw_to_world_quat_wxyz
+from da3lora.specs import Gaussians
+from da3lora.utils.geometry import affine_inverse, get_world_rays, sample_image_grid
+from da3lora.utils.pose_align import batch_align_poses_umeyama
+from da3lora.utils.sh_helpers import rotate_sh
 
 
 class GaussianAdapter(nn.Module):

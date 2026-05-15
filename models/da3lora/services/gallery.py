@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 # flake8: noqa: E501
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates

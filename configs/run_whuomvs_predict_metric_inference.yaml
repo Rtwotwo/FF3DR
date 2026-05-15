@@ -1,0 +1,37 @@
+# WHU-OMVS Predict Split Metric Inference Configuration
+# =====================================================
+# Benchmark evaluation on the WHU-OMVS standard test set (predict split)
+# Dataset: large-frame images (3712 x 5504), 5 cameras, ~268 total samples
+# GSD: 0.2m (ground sample distance)
+#
+# Ada-MVS Paper Metrics (Liu et al. 2023, Eqs. 7-9):
+#   DSM-level:
+#     MAE (m): Mean Absolute Error with outlier threshold T
+#     RMSE (m): Root Mean Square Error with outlier threshold T
+#     PAG_0.2m (%): Percentage of Accurate Grids with |error| < 0.2m
+#     PAG_0.4m (%): Percentage of Accurate Grids with |error| < 0.4m
+#     PAG_0.6m (%): Percentage of Accurate Grids with |error| < 0.6m
+#   Standard depth metrics (for cross-benchmark comparison):
+#     abs_rel, sq_rel, rmse_log, log10, silog, delta1, delta2, delta3
+#   Normal (optional):
+#     mean angular error, median angular error
+
+Dataset:
+  dataset_path: ./dataset/WHU-OMVS/predict
+  camera_ids: [1, 2, 3, 4, 5]
+
+Model:
+  model_name: depthanything3
+
+Evaluation:
+  batch_size: 1
+  align_mode: median
+  outlier_threshold: 20.0
+  eval_normal: false
+  eval_dsm: true
+
+Output:
+  output_path: ./exp/whu-omvs/predict_metric_eval
+
+Hardware:
+  gpu_id: 0

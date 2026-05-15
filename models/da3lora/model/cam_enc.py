@@ -14,10 +14,10 @@
 
 import torch.nn as nn
 
-from depth_anything_3.model.utils.attention import Mlp
-from depth_anything_3.model.utils.block import Block
-from depth_anything_3.model.utils.transform import extri_intri_to_pose_encoding
-from depth_anything_3.utils.geometry import affine_inverse
+from da3lora.model.utils.attention import Mlp
+from da3lora.model.utils.block import Block
+from da3lora.model.utils.transform import extri_intri_to_pose_encoding
+from da3lora.utils.geometry import affine_inverse
 
 
 class CameraEnc(nn.Module):

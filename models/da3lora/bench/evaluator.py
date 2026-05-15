@@ -32,10 +32,10 @@ import torch
 from addict import Dict
 from tqdm import tqdm
 
-from depth_anything_3.bench.print_metrics import MetricsPrinter
-from depth_anything_3.utils.parallel_utils import parallel_execution
-from depth_anything_3.bench.registries import MV_REGISTRY
-from depth_anything_3.utils.constants import EVAL_REF_VIEW_STRATEGY
+from da3lora.bench.print_metrics import MetricsPrinter
+from da3lora.utils.parallel_utils import parallel_execution
+from da3lora.bench.registries import MV_REGISTRY
+from da3lora.utils.constants import EVAL_REF_VIEW_STRATEGY
 
 
 class Evaluator:
@@ -413,9 +413,9 @@ class Evaluator:
         Returns:
             Dict with pose metrics
         """
-        from depth_anything_3.bench.dataset import _wait_for_file_ready
-        from depth_anything_3.bench.utils import compute_pose
-        from depth_anything_3.utils.geometry import as_homogeneous
+        from da3lora.bench.dataset import _wait_for_file_ready
+        from da3lora.bench.utils import compute_pose
+        from da3lora.utils.geometry import as_homogeneous
 
         _wait_for_file_ready(result_path)
         pred = np.load(result_path)
@@ -535,7 +535,7 @@ class Evaluator:
 if __name__ == "__main__":
     import sys
     from omegaconf import OmegaConf
-    from depth_anything_3.cfg import load_config
+    from da3lora.cfg import load_config
 
     # Get default config path (relative to this file)
     _default_config = os.path.join(
@@ -737,7 +737,7 @@ Examples:
             evaluator.print_metrics(metrics)
         else:
             # Single GPU or worker process
-            from depth_anything_3.api import DepthAnything3
+            from da3lora.api import DepthAnything3
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             api = DepthAnything3.from_pretrained(model_path)

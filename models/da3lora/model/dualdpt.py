@@ -1,3 +1,4 @@
+from __future__ import annotations
 # flake8: noqa E501
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
@@ -18,8 +19,8 @@ import torch
 import torch.nn as nn
 from addict import Dict
 
-from depth_anything_3.model.dpt import _make_fusion_block, _make_scratch
-from depth_anything_3.model.utils.head_utils import (
+from da3lora.model.dpt import _make_fusion_block, _make_scratch
+from da3lora.model.utils.head_utils import (
     Permute,
     create_uv_grid,
     custom_interpolate,

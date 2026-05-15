@@ -1,0 +1,42 @@
+# DA3 LoRA Fine-tuning Configuration for MatrixCity
+# ================================================
+
+Dataset:
+  dataset_dir: /data2/dataset/Redal/work_feedforward_3drepo/dataset/MatrixCity
+  city_size: big_city
+  split: train
+  num_views: 2
+  image_size: 504
+  stride: 10
+  max_depth: 500.0
+  depth_supervision: 1
+
+Model:
+  model_name: da3-large
+  pretrained_path: ""
+  lora_r: 8
+  lora_alpha: 16.0
+  lora_dropout: 0.0
+
+Training:
+  batch_size: 1
+  num_workers: 4
+  epochs: 10
+  lr: 0.0001
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_grad_norm: 1.0
+  depth_loss_weight: 1.0
+  pose_loss_weight: 0.5
+  seed: 42
+
+Output:
+  output_dir: ""
+  save_every: 1
+  log_every: 10
+
+Resume:
+  resume: ""
+
+Hardware:
+  gpu_id: 0

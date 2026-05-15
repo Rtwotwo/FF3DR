@@ -29,7 +29,7 @@ import torch
 from addict import Dict
 from scipy.spatial import KDTree
 
-from depth_anything_3.utils.geometry import mat_to_quat
+from da3lora.utils.geometry import mat_to_quat
 
 
 # =============================================================================

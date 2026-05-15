@@ -28,9 +28,9 @@ from typing import Dict as TDict
 import numpy as np
 from addict import Dict
 
-from depth_anything_3.bench.dataset import Dataset
-from depth_anything_3.bench.registries import MONO_REGISTRY, MV_REGISTRY
-from depth_anything_3.utils.constants import (
+from da3lora.bench.dataset import Dataset
+from da3lora.bench.registries import MONO_REGISTRY, MV_REGISTRY
+from da3lora.utils.constants import (
     DTU64_CAMERA_ROOT,
     DTU64_EVAL_DATA_ROOT,
     DTU64_SCENES,

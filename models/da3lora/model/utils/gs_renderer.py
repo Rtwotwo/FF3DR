@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,8 +20,8 @@ import torch
 from einops import rearrange, repeat
 from tqdm import tqdm
 
-from depth_anything_3.specs import Gaussians
-from depth_anything_3.utils.camera_trj_helpers import (
+from da3lora.specs import Gaussians
+from da3lora.utils.camera_trj_helpers import (
     interpolate_extrinsics,
     interpolate_intrinsics,
     render_dolly_zoom_path,
@@ -28,8 +29,8 @@ from depth_anything_3.utils.camera_trj_helpers import (
     render_wander_path,
     render_wobble_inter_path,
 )
-from depth_anything_3.utils.geometry import affine_inverse, as_homogeneous, get_fov
-from depth_anything_3.utils.logger import logger
+from da3lora.utils.geometry import affine_inverse, as_homogeneous, get_fov
+from da3lora.utils.logger import logger
 
 try:
     from gsplat import rasterization

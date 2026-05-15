@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,15 +29,15 @@ import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin
 from PIL import Image
 
-from models.depthanything3.cfg import create_object, load_config
-from models.depthanything3.registry import MODEL_REGISTRY
-from models.depthanything3.specs import Prediction
-from models.depthanything3.utils.export import export
-from models.depthanything3.utils.geometry import affine_inverse
-from models.depthanything3.utils.io.input_processor import InputProcessor
-from models.depthanything3.utils.io.output_processor import OutputProcessor
-from models.depthanything3.utils.logger import logger
-from models.depthanything3.utils.pose_align import align_poses_umeyama
+from models.da3lora.cfg import create_object, load_config
+from models.da3lora.registry import MODEL_REGISTRY
+from models.da3lora.specs import Prediction
+from models.da3lora.utils.export import export
+from models.da3lora.utils.geometry import affine_inverse
+from models.da3lora.utils.io.input_processor import InputProcessor
+from models.da3lora.utils.io.output_processor import OutputProcessor
+from models.da3lora.utils.logger import logger
+from models.da3lora.utils.pose_align import align_poses_umeyama
 
 torch.backends.cudnn.benchmark = False
 # logger.info("CUDNN Benchmark Disabled")

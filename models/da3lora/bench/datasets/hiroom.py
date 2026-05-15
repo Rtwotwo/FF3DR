@@ -31,15 +31,15 @@ import numpy as np
 import open3d as o3d
 from addict import Dict
 
-from depth_anything_3.bench.dataset import Dataset, _wait_for_file_ready
-from depth_anything_3.bench.registries import MONO_REGISTRY, MV_REGISTRY
-from depth_anything_3.bench.utils import (
+from da3lora.bench.dataset import Dataset, _wait_for_file_ready
+from da3lora.bench.registries import MONO_REGISTRY, MV_REGISTRY
+from da3lora.bench.utils import (
     create_tsdf_volume,
     evaluate_3d_reconstruction,
     fuse_depth_to_tsdf,
     sample_points_from_mesh,
 )
-from depth_anything_3.utils.constants import (
+from da3lora.utils.constants import (
     HIROOM_DOWN_SAMPLE,
     HIROOM_EVAL_DATA_ROOT,
     HIROOM_EVAL_THRESHOLD,
@@ -50,7 +50,7 @@ from depth_anything_3.utils.constants import (
     HIROOM_SDF_TRUNC,
     HIROOM_VOXEL_LENGTH,
 )
-from depth_anything_3.utils.pose_align import align_poses_umeyama
+from da3lora.utils.pose_align import align_poses_umeyama
 
 
 def _load_scene_list() -> List[str]:

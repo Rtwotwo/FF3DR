@@ -20,7 +20,7 @@ import torch.nn as nn
 from addict import Dict
 from einops import rearrange
 
-from depth_anything_3.model.utils.head_utils import (
+from da3lora.model.utils.head_utils import (
     Permute,
     create_uv_grid,
     custom_interpolate,

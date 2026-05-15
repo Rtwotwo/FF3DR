@@ -22,10 +22,10 @@ from __future__ import annotations
 import os
 import typer
 
-from depth_anything_3.services import start_server
-from depth_anything_3.services.gallery import gallery as gallery_main
-from depth_anything_3.services.inference_service import run_inference
-from depth_anything_3.services.input_handlers import (
+from da3lora.services import start_server
+from da3lora.services.gallery import gallery as gallery_main
+from da3lora.services.inference_service import run_inference
+from da3lora.services.input_handlers import (
     ColmapHandler,
     ImageHandler,
     ImagesHandler,
@@ -33,7 +33,7 @@ from depth_anything_3.services.input_handlers import (
     VideoHandler,
     parse_export_feat,
 )
-from depth_anything_3.utils.constants import (
+from da3lora.utils.constants import (
     DEFAULT_EXPORT_DIR,
     DEFAULT_GALLERY_DIR,
     DEFAULT_GRADIO_DIR,
@@ -700,7 +700,7 @@ def gradio(
     ),
 ):
     """Launch Depth Anything 3 Gradio interactive web application"""
-    from depth_anything_3.app.gradio_app import DepthAnything3App
+    from da3lora.app.gradio_app import DepthAnything3App
 
     # Create necessary directories
     os.makedirs(workspace_dir, exist_ok=True)

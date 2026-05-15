@@ -23,7 +23,7 @@ import importlib
 import pkgutil
 import threading
 
-from depth_anything_3.utils.registry import Registry
+from da3lora.utils.registry import Registry
 
 __all__ = ["METRIC_REGISTRY", "MONO_REGISTRY", "MV_REGISTRY", "NVS_REGISTRY"]
 
