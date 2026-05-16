@@ -48,10 +48,14 @@ from loop_utils.alignment_torch import apply_sim3_direct_torch, depth_to_point_c
 from loop_utils.sim3utils import (
     accumulate_sim3_transforms,
     compute_alignment_error,
+    compute_sim3_ab,
     merge_ply_files,
     precompute_scale_chunks_with_depth,
+    process_loop_list,
     save_confident_pointcloud_batch,
-    weighted_align_point_maps,)
+    weighted_align_point_maps,
+)
+from loop_utils.loop_detector import LoopDetector
 
 from models.depthanything3.api import DepthAnything3
 from models.mapanything.models.mapanything.model import MapAnything
@@ -108,6 +112,8 @@ class FF3DR:
         self.predictions_unaligned_dir = os.path.join(self.output_path, "tmp_predictions_unaligned")
         for p in [self.output_path, self.predictions_pcd_dir, self.predictions_loop_dir, self.predictions_aligned_dir, self.predictions_unaligned_dir]:
             os.makedirs(p, exist_ok=True)
+        self.loop_enable = bool(self.config.get("Model", {}).get("loop_enable", False))
+        self.loop_chunk_half_window = int(self.config.get("Model", {}).get("loop_chunk_size", 20))
         self.camera_dirs, self.image_paths = self._build_camera_index(self.area_path)
         self.active_block_name = os.path.basename(os.path.normpath(self.area_path))
 
@@ -1071,6 +1077,123 @@ class FF3DR:
                 images = images.clip(0, 255).astype(np.uint8)
         return world_points, conf, images, depth
 
+    def _run_loop_detection(self, chunk_indices):
+        """Run SALAD-based loop detection on the image sequence.
+
+        Returns a list of (chunk_idx1, range1, chunk_idx2, range2) tuples
+        representing loop closure pairs with their local frame ranges.
+        """
+        anchor_dir = self.camera_dirs[self.anchor_cam_index] if self.num_cameras > 1 else self.area_path
+        loop_output = os.path.join(self.output_path, "loop_closures.txt")
+        detector = LoopDetector(
+            image_dir=anchor_dir,
+            output=loop_output,
+            config=self.config,
+        )
+        logger.info("[INFO] Running loop detection on: %s", anchor_dir)
+        detector.run()
+        loop_list = detector.get_loop_list()
+        if len(loop_list) == 0:
+            logger.info("[INFO] No loop closures detected")
+            return []
+        logger.info("[INFO] Detected %d loop closure pairs", len(loop_list))
+        processed = process_loop_list(chunk_indices, loop_list, half_window=self.loop_chunk_half_window)
+        logger.info("[INFO] Processed %d loop pairs into chunk frame ranges", len(processed))
+        return processed
+
+    def _compute_loop_sim3(self, loop_pairs, chunk_indices, cumulative_sim3):
+        """Infer loop chunks and compute relative SIM3 transforms for each loop pair.
+
+        For each loop pair (chunk_i, range_i, chunk_j, range_j):
+        1. Run inference on both ranges (is_loop=True).
+        2. Compute SIM3 between the two loop predictions.
+        3. Compare with the accumulated SIM3 from sequential alignment.
+        4. Compute a correction transform.
+
+        Returns a list of (chunk_idx_j, correction_sim3) for global optimization.
+        """
+        loop_sim3_corrections = []
+        for pair_idx, (ci, range_i, cj, range_j) in enumerate(loop_pairs):
+            logger.info(
+                "[Loop] pair %d/%d: chunk_i=%d range=%s, chunk_j=%d range=%s",
+                pair_idx + 1, len(loop_pairs), ci, range_i, cj, range_j,
+            )
+            try:
+                pred_i = self.inference_single_chunk(range_i, is_loop=True)
+                pred_j = self.inference_single_chunk(range_j, is_loop=True)
+            except Exception as e:
+                logger.warning("[Loop] Inference failed for pair %d: %s", pair_idx, str(e))
+                continue
+
+            pts_i, conf_i, _, depth_i = self._chunk_to_point_arrays(pred_i)
+            pts_j, conf_j, _, depth_j = self._chunk_to_point_arrays(pred_j)
+
+            try:
+                s_loop, R_loop, t_loop, err_loop = self.align_2pcds(
+                    pts_i, conf_i, pts_j, conf_j,
+                    np.squeeze(depth_i) if depth_i is not None else None,
+                    np.squeeze(depth_j) if depth_j is not None else None,
+                    np.squeeze(conf_i), np.squeeze(conf_j),
+                )
+            except Exception as e:
+                logger.warning("[Loop] Alignment failed for pair %d: %s", pair_idx, str(e))
+                continue
+
+            logger.info("[Loop] pair %d: alignment error=%.4f, s=%.4f", pair_idx, err_loop, s_loop)
+
+            S_loop = (s_loop, R_loop, t_loop)
+
+            if ci < len(cumulative_sim3) and cj > 0 and (cj - 1) < len(cumulative_sim3):
+                S_i = cumulative_sim3[ci] if ci > 0 else (1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32))
+                S_j = cumulative_sim3[cj - 1]
+                S_ij_sequential = compute_sim3_ab(S_i, S_j)
+                S_correction = compute_sim3_ab(S_ij_sequential, S_loop)
+                loop_sim3_corrections.append((cj, S_correction, err_loop))
+                logger.info(
+                    "[Loop] pair %d: correction s=%.4f, rot=%.2fdeg, |t|=%.4f",
+                    pair_idx,
+                    S_correction[0],
+                    self._rotation_angle_deg(S_correction[1]),
+                    float(np.linalg.norm(S_correction[2])),
+                )
+            else:
+                logger.warning("[Loop] pair %d: chunk indices out of cumulative_sim3 range, skipping", pair_idx)
+
+        return loop_sim3_corrections
+
+    def _apply_loop_corrections(self, cumulative_sim3, loop_corrections, num_chunks):
+        """Apply loop closure corrections to the cumulative SIM3 transforms.
+
+        Uses a weighted averaging approach: for each chunk that has a loop
+        correction, blend the correction into the cumulative transform.
+        The blending weight is inversely proportional to the loop alignment error.
+        """
+        if len(loop_corrections) == 0:
+            return cumulative_sim3
+
+        correction_map = {}
+        for cj, S_corr, err in loop_corrections:
+            if cj not in correction_map or err < correction_map[cj][1]:
+                correction_map[cj] = (S_corr, err)
+
+        corrected = list(cumulative_sim3)
+        for cj, (S_corr, err) in correction_map.items():
+            if cj - 1 < len(corrected):
+                s_c, R_c, t_c = corrected[cj - 1]
+                s_corr, R_corr, t_corr = S_corr
+                w = min(1.0, 0.3 / (err + 1e-6))
+                w = min(w, 0.5)
+                s_new = s_c * (1.0 - w) + (s_c * s_corr) * w
+                R_new = R_c
+                t_new = t_c * (1.0 - w) + (s_corr * (R_corr @ t_c) + t_corr) * w
+                corrected[cj - 1] = (s_new, R_new, t_new)
+                logger.info(
+                    "[Loop] Corrected chunk %d: w=%.3f, s=%.4f->%.4f",
+                    cj, w, s_c, s_new,
+                )
+
+        return corrected
+
     def process_long_sequence(self):
         """Run chunked reconstruction and align chunk coordinate systems with SIM3."""
         if self.num_frames == 0:
@@ -1144,6 +1267,21 @@ class FF3DR:
             cumulative_sim3 = accumulate_sim3_transforms(sim3_list)
         else:
             cumulative_sim3 = []
+
+        # ── Loop closure detection and correction ──────────────────────────
+        if self.loop_enable and len(chunk_indices) > 1:
+            logger.info("[INFO] Loop closure detection enabled")
+            loop_pairs = self._run_loop_detection(chunk_indices)
+            if len(loop_pairs) > 0:
+                loop_corrections = self._compute_loop_sim3(loop_pairs, chunk_indices, cumulative_sim3)
+                if len(loop_corrections) > 0:
+                    cumulative_sim3 = self._apply_loop_corrections(cumulative_sim3, loop_corrections, len(chunk_indices))
+                    logger.info("[INFO] Applied %d loop corrections to cumulative SIM3", len(loop_corrections))
+                else:
+                    logger.info("[INFO] No valid loop corrections computed")
+            else:
+                logger.info("[INFO] No loop pairs to process")
+
         prev_aligned_world_points = None
         prev_aligned_confs = None
         for chunk_idx in range(len(chunk_indices)):

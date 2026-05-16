@@ -1,4 +1,10 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "http.systemCertificatesNode": false,
+    "http.proxy": "",
+    "http.proxyStrictSsl": false,
+    "github.copilot.advanced.debug.useElectronFetcher": false,
+    "github.copilot.advanced.debug.useNodeFetcher": true,
+    "github.copilot.advanced.debug.useNodeFetchFetcher": false
 }

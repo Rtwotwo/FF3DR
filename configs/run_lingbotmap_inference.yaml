@@ -1,12 +1,18 @@
 RunArgs:
+  dataset_type: auto
   dataset_path: ./dataset/MatrixCity
   city_size: small_city
   train_test_split: train
   model_path: ./weights/lingbot-map/lingbot-map-long.pt
-  output_path: ./exp/matrixcity/run_matrixcity_lingbotmap
+  output_path: ./exp/matrixcity/run_lingbotmap
   mode: windowed
   image_size: 518
   patch_size: 14
+  image_ext: .jpg,.png,.JPG,.PNG,.jpeg,.JPEG
+  single_camera: false
+  camera_index: 0
+  camera_ids: null
+  num_cameras_to_use: 0
   enable_3d_rope: true
   max_frame_num: 1024
   num_scale_frames: 8

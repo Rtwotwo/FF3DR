@@ -1,32 +1,41 @@
-"""LingBot-MAP: streaming 3D reconstruction for MatrixCity (big_city & small_city).
+"""LingBot-MAP: streaming 3D reconstruction for multiple datasets.
+
+Supports MatrixCity, WHU-OMVS, and UrbanScene datasets with auto-detection.
 
 Usage:
-    # Single block reconstruction with result saving
-    python run_lingbotmap_matrixcity_inference.py \
+    # MatrixCity (auto-detected from path)
+    python run_lingbotmap_inference.py \
         --model_path ./weights/lingbot-map/lingbot-map.pt \
         --image_folder ./dataset/MatrixCity/small_city/aerial/train/block_1/ \
-        --output_path ./exp/matrixcity/run_matrixcity_lingbotmap_train_block_1
+        --output_path ./exp/matrixcity/run_lingbotmap_train_block_1
+
+    # WHU-OMVS (multi-camera, single-camera mode for LingBot-MAP)
+    python run_lingbotmap_inference.py \
+        --model_path ./weights/lingbot-map/lingbot-map.pt \
+        --image_folder ./dataset/WHU-OMVS/train/area1/ \
+        --single_camera --camera_index 2 \
+        --output_path ./exp/whuomvs/run_lingbotmap_area1
+
+    # UrbanScene (real drone imagery)
+    python run_lingbotmap_inference.py \
+        --model_path ./weights/lingbot-map/lingbot-map.pt \
+        --image_folder ./dataset/UrbanScene/PolyTech/ \
+        --output_path ./exp/urbanscene/run_lingbotmap_polytech
 
     # Streaming inference with keyframe KV caching
-    python run_lingbotmap_matrixcity_inference.py \
+    python run_lingbotmap_inference.py \
         --model_path ./weights/lingbot-map/lingbot-map.pt \
         --image_folder /path/to/images/ --mode streaming --keyframe_interval 6 \
-        --output_path ./exp/matrixcity/output
+        --output_path ./exp/output
 
     # Windowed inference (for very long sequences, >500 frames)
-    python run_lingbotmap_matrixcity_inference.py \
+    python run_lingbotmap_inference.py \
         --model_path ./weights/lingbot-map/lingbot-map.pt \
         --image_folder /path/to/images/ --mode windowed --window_size 64 \
-        --output_path ./exp/matrixcity/output
-
-    # Visualization only (no saving)
-    python run_lingbotmap_matrixcity_inference.py \
-        --model_path ./weights/lingbot-map/lingbot-map.pt \
-        --image_folder /path/to/images/ --vis_only
+        --output_path ./exp/output
 """
 
 import argparse
-import glob
 import os
 import sys
 import time
@@ -60,69 +69,7 @@ from tqdm.auto import tqdm
 
 from models.lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
 from models.lingbot_map.utils.geometry import closed_form_inverse_se3_general
-from models.lingbot_map.utils.load_fn import load_and_preprocess_images
-
-
-# =============================================================================
-# Image loading
-# =============================================================================
-
-def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png",
-                first_k=None, stride=1, image_size=518, patch_size=14, num_workers=8):
-    """Load images from folder or video and preprocess into a tensor.
-
-    Returns:
-        (images, paths, resolved_image_folder): preprocessed tensor, file paths,
-        and the folder containing the source images (for sky mask caching etc.).
-    """
-    if video_path is not None:
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
-        out_dir = os.path.join(os.path.dirname(video_path), f"{video_name}_frames")
-        os.makedirs(out_dir, exist_ok=True)
-        cap = cv2.VideoCapture(video_path)
-        src_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        interval = max(1, round(src_fps / fps))
-        idx, saved = 0, []
-        pbar = tqdm(total=total_frames, desc="Extracting frames", unit="frame")
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if idx % interval == 0:
-                path = os.path.join(out_dir, f"{len(saved):06d}.jpg")
-                cv2.imwrite(path, frame)
-                saved.append(path)
-            idx += 1
-            pbar.update(1)
-        pbar.close()
-        cap.release()
-        paths = saved
-        resolved_folder = out_dir
-        print(f"Extracted {len(paths)} frames from video ({total_frames} total, interval={interval})")
-    else:
-        exts = image_ext.split(",")
-        paths = []
-        for ext in exts:
-            paths.extend(glob.glob(os.path.join(image_folder, f"*{ext}")))
-        paths = sorted(paths)
-        resolved_folder = image_folder
-
-    if first_k is not None and first_k > 0:
-        paths = paths[:first_k]
-    if stride > 1:
-        paths = paths[::stride]
-
-    print(f"Loading {len(paths)} images...")
-    images = load_and_preprocess_images(
-        paths,
-        mode="crop",
-        image_size=image_size,
-        patch_size=patch_size,
-    )
-    h, w = images.shape[-2:]
-    print(f"Preprocessed images to {w}x{h} using canonical crop mode")
-    return images, paths, resolved_folder
+from running.utils.dataset_loader import DatasetLoader, load_from_video
 
 
 # =============================================================================
@@ -400,6 +347,23 @@ def main():
     parser.add_argument("--first_k", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
 
+    # Dataset
+    parser.add_argument("--dataset_type", type=str, default="auto",
+                        choices=["auto", "matrixcity", "whu_omvs", "urbanscene"],
+                        help="Dataset type. 'auto' infers from directory structure.")
+    parser.add_argument("--image_ext", type=str, default=".jpg,.png,.JPG,.PNG,.jpeg,.JPEG",
+                        help="Comma-separated image extensions to search for.")
+    parser.add_argument("--single_camera", action="store_true", default=False,
+                        help="For multi-camera datasets (WHU-OMVS), load only one camera. "
+                            "LingBot-MAP is a single-camera model, so this is recommended for WHU-OMVS.")
+    parser.add_argument("--camera_index", type=int, default=0,
+                        help="Camera index to select when --single_camera is set. "
+                            "For WHU-OMVS: 0=cam1, 1=cam2, 2=cam3(nadir), 3=cam4, 4=cam5.")
+    parser.add_argument("--camera_ids", type=str, nargs="*", default=None,
+                        help="Specific camera IDs to load (WHU-OMVS only, e.g. --camera_ids 1 3 5).")
+    parser.add_argument("--num_cameras_to_use", type=int, default=0,
+                        help="Max number of cameras to load (WHU-OMVS only, 0=all).")
+
     # Model
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--image_size", type=int, default=518)
@@ -474,11 +438,41 @@ def main():
 
     # ── Load images & model ──────────────────────────────────────────────────
     t0 = time.time()
-    images, paths, resolved_image_folder = load_images(
-        image_folder=args.image_folder, video_path=args.video_path,
-        fps=args.fps, first_k=args.first_k, stride=args.stride,
-        image_size=args.image_size, patch_size=args.patch_size,
-    )
+
+    if args.video_path is not None:
+        ds_result = load_from_video(
+            video_path=args.video_path,
+            fps=args.fps,
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            first_k=args.first_k,
+            stride=args.stride,
+        )
+    else:
+        loader = DatasetLoader(
+            dataset_path=args.image_folder,
+            dataset_type=args.dataset_type,
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            first_k=args.first_k,
+            stride=args.stride,
+            image_ext=args.image_ext,
+            camera_ids=args.camera_ids,
+            num_cameras_to_use=args.num_cameras_to_use,
+        )
+        if args.single_camera:
+            ds_result = loader.load_single_camera(camera_index=args.camera_index)
+        else:
+            ds_result = loader.load()
+
+    images = ds_result["images"]
+    paths = ds_result["paths"]
+    resolved_image_folder = ds_result["resolved_folder"]
+    dataset_type = ds_result["dataset_type"]
+    num_cameras = ds_result["num_cameras"]
+    num_frames_per_cam = ds_result["num_frames"]
+
+    print(f"Dataset: {dataset_type}, cameras={num_cameras}, frames/cam={num_frames_per_cam}, total={len(paths)}")
 
     # Export preprocessed images if requested
     if args.export_preprocessed:
@@ -512,8 +506,8 @@ def main():
 
     images = images.to(device)
     num_frames = images.shape[0]
-    print(f"Input: {num_frames} frames, shape {tuple(images.shape)}")
-    print(f"Mode: {args.mode}")
+    print(f"Input: {num_frames} images ({num_cameras} cameras x {num_frames_per_cam} frames), shape {tuple(images.shape)}")
+    print(f"Dataset type: {dataset_type}, Mode: {args.mode}")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         print(
