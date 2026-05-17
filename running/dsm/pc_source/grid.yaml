@@ -1,0 +1,22 @@
+num_threads: -1
+bin_select_method: "Robust_Max"   # choice [None Min Max Mean Median Robust_Mean Robust_Max Robust_Min]
+
+use_hull: false
+interpolation_method: None    # choice [None Nearst MovingAverage InverseDistanceWeight OrdinaryKriging Delaunay]
+min_neighbor_num: 5
+max_neighbor_num: 11
+search_radius: 9999
+num_sectors: 1
+idw_power: 2
+subset_size: 3000
+increments: 1
+min_n: 500
+semivariogram: "auto"
+
+# Bonding Box
+x_start: -430.0
+y_start: 250.0
+x_size: 2900
+y_size: 2900
+x_cell: 0.2
+y_cell: 0.2

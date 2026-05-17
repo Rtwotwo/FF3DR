@@ -1,8 +1,8 @@
 dependencies = ['torch']
 
 import torch
-from vpr_model import VPRModel
-from models.backbones.dinov2 import DINOV2_ARCHS
+from loop_utils.salad.vpr_model import VPRModel
+from loop_utils.salad.models.backbones.dinov2 import DINOV2_ARCHS
 
 
 def dinov2_salad(

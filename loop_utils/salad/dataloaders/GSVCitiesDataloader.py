@@ -2,7 +2,7 @@ import pytorch_lightning as pl
 from torch.utils.data.dataloader import DataLoader
 from torchvision import transforms as T
 
-from dataloaders.GSVCitiesDataset import GSVCitiesDataset
+from loop_utils.salad.dataloaders.GSVCitiesDataset import GSVCitiesDataset
 from . import PittsburgDataset
 from . import MapillaryDataset
 

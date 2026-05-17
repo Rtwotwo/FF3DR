@@ -8,7 +8,7 @@
 
 
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/WHU-OMVS"
-TRAIN_TEST_SPLIT="train"
+TRAIN_TEST_SPLIT="predict"
 MODEL_NAMES=("depthanything3" "mapanything" "pi3" "vggt")
 GPU_ID=6
  
