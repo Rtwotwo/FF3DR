@@ -27,8 +27,6 @@ from tqdm import tqdm
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SALAD_ROOT = os.path.join(CURRENT_DIR, "salad")
-if SALAD_ROOT not in sys.path:
-    sys.path.insert(0, SALAD_ROOT)
 from loop_utils.salad.models import helper
 
 

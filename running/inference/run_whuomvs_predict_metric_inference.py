@@ -4,9 +4,12 @@ import argparse
 import json
 import logging
 import os
+
+import struct
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -27,9 +30,108 @@ def _find_repo_root(start: Path) -> Path:
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _find_repo_root(_SCRIPT_DIR)
 _RUNNING_DIR = _SCRIPT_DIR.parent
-for path in (_REPO_ROOT, _RUNNING_DIR):
+_DA3_SRC = _REPO_ROOT / "clones" / "Depth-Anything-3" / "src"
+for path in (_REPO_ROOT, _RUNNING_DIR, _DA3_SRC):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
+
+
+def save_pfm(filename: str, image: np.ndarray, scale: float = 1.0) -> None:
+    with open(filename, "wb") as f:
+        if image.dtype != np.float32:
+            image = image.astype(np.float32)
+        image = np.flipud(image)
+        color = image.ndim == 3 and image.shape[2] == 3
+        f.write(("PF\n" if color else "Pf\n").encode("utf-8"))
+        f.write("{} {}\n".format(image.shape[1], image.shape[0]).encode("utf-8"))
+        endian = image.dtype.byteorder
+        if endian == "<" or (endian == "=" and sys.byteorder == "little"):
+            scale = -scale
+        f.write(("{:.6f}\n".format(scale)).encode("utf-8"))
+        image.tofile(f)
+
+
+def write_adamvs_cam(
+    filepath: str,
+    extrinsic_4x4: np.ndarray,
+    intrinsic_3x3: np.ndarray,
+    depth_min: float,
+    depth_max: float,
+    num_depth: int = 192,
+    ref_image_path: str = "",
+) -> None:
+    interval = (depth_max - depth_min) / num_depth if num_depth > 0 else 0.0
+    with open(filepath, "w") as f:
+        f.write("extrinsic: XrightYdown, [Rcw|tcw]\n")
+        for i in range(4):
+            row_vals = [str(extrinsic_4x4[i, j]) for j in range(4)]
+            f.write(" ".join(row_vals) + " \n")
+        f.write("\n")
+        f.write("intrinsic\n")
+        for i in range(3):
+            row_vals = [str(intrinsic_3x3[i, j]) for j in range(3)]
+            f.write(" ".join(row_vals) + " \n")
+        f.write("\n")
+        f.write("{} {} {} {}\n".format(depth_min, interval, num_depth, depth_max))
+        f.write("\n")
+        f.write(str(ref_image_path) + "\n")
+
+
+def align_depth_median(pred_depth: np.ndarray, gt_depth: np.ndarray) -> Tuple[np.ndarray, float]:
+    valid = np.isfinite(pred_depth) & np.isfinite(gt_depth) & (pred_depth > 1e-8) & (gt_depth > 1e-8)
+    if not np.any(valid):
+        return pred_depth, 1.0
+    scale = float(np.median(gt_depth[valid])) / float(np.median(pred_depth[valid]))
+    if not np.isfinite(scale) or abs(scale) < 1e-8:
+        return pred_depth, 1.0
+    return pred_depth * scale, scale
+
+
+def align_depth_least_squares(pred_depth: np.ndarray, gt_depth: np.ndarray) -> Tuple[np.ndarray, float]:
+    valid = np.isfinite(pred_depth) & np.isfinite(gt_depth) & (pred_depth > 1e-8) & (gt_depth > 1e-8)
+    if valid.sum() < 10:
+        return pred_depth, 1.0
+    p = pred_depth[valid].astype(np.float64)
+    g = gt_depth[valid].astype(np.float64)
+    scale = float(np.dot(p, g) / (np.dot(p, p) + 1e-12))
+    if not np.isfinite(scale) or abs(scale) < 1e-8:
+        return pred_depth, 1.0
+    return pred_depth * scale, scale
+
+
+def align_depth_affine(pred_depth: np.ndarray, gt_depth: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    valid = np.isfinite(pred_depth) & np.isfinite(gt_depth) & (pred_depth > 1e-8) & (gt_depth > 1e-8)
+    if valid.sum() < 10:
+        return pred_depth, 1.0, 0.0
+    p = pred_depth[valid].astype(np.float64)
+    g = gt_depth[valid].astype(np.float64)
+    A = np.column_stack([p, np.ones_like(p)])
+    result = np.linalg.lstsq(A, g, rcond=None)[0]
+    scale = float(result[0])
+    shift = float(result[1])
+    if not np.isfinite(scale) or abs(scale) < 1e-8:
+        return pred_depth, 1.0, 0.0
+    return pred_depth * scale + shift, scale, shift
+
+
+def build_w2c_extrinsic_from_whuomvs(Rwc: np.ndarray, twc: np.ndarray) -> np.ndarray:
+    O_xrightyup = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float64)
+    Rwc_down = Rwc @ O_xrightyup
+    c2w = np.eye(4, dtype=np.float64)
+    c2w[:3, :3] = Rwc_down
+    c2w[:3, 3] = twc
+    w2c = np.linalg.inv(c2w)
+    return w2c
+
+
+def build_intrinsic_3x3(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
+    K = np.zeros((3, 3), dtype=np.float64)
+    K[0, 0] = fx
+    K[1, 1] = fy
+    K[0, 2] = cx
+    K[1, 2] = cy
+    K[2, 2] = 1.0
+    return K
 
 from metrics import AdaMVSMetricAccumulator, DSMMetricAccumulator
 from metrics.dsm_metrics import (
@@ -165,7 +267,7 @@ class PredictMetricInfer:
       - mean angular error, median angular error
     """
 
-    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True):
+    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced"):
         self.cfg = cfg
         self.dataset_path = Path(dataset_path)
         self.camera_ids = [str(cid) for cid in camera_ids]
@@ -174,6 +276,12 @@ class PredictMetricInfer:
         self.eval_normal = eval_normal
         self.outlier_threshold = float(outlier_threshold)
         self.eval_dsm = eval_dsm
+        self.save_adamvs_format = save_adamvs_format
+        self.adamvs_output_path = Path(adamvs_output_path) if adamvs_output_path else None
+        self.depth_align_method = depth_align_method
+        self.multiview_num_neighbors = int(multiview_num_neighbors)
+        self.multiview_process_res = int(multiview_process_res)
+        self.multiview_ref_strategy = multiview_ref_strategy
         self.model_name = self.cfg["Model"].get("name", self.cfg["Model"].get("model_name", "depthanything3"))
         if torch.cuda.is_available():
             self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -184,7 +292,7 @@ class PredictMetricInfer:
 
         self._name_to_params = None
         self._dsm_grid = None
-        if self.eval_dsm:
+        if self.eval_dsm or self.save_adamvs_format:
             self._load_dsm_infrastructure()
 
     def _cfg_get_weight(self, model_key, field, fallback_flat_key=None):
@@ -301,6 +409,8 @@ class PredictMetricInfer:
             return self._predict_batch_pi3(image_paths)
         if self.model_name == "vggt":
             return self._predict_batch_vggt(image_paths)
+        if self.model_name == "depthanything3" and self.multiview_num_neighbors > 0:
+            return self._predict_batch_da3_single(image_paths)
 
         with torch.no_grad():
             if torch.cuda.is_available():
@@ -318,10 +428,33 @@ class PredictMetricInfer:
             depth = np.squeeze(depth, axis=1)
         if depth.ndim == 4 and depth.shape[-1] == 1:
             depth = np.squeeze(depth, axis=-1)
-        return depth
+
+        conf = None
+        if hasattr(prediction, "depth_conf"):
+            conf = prediction.depth_conf
+        elif hasattr(prediction, "conf"):
+            conf = prediction.conf
+        if conf is not None:
+            if isinstance(conf, torch.Tensor):
+                conf = conf.detach().cpu().numpy()
+            else:
+                conf = np.asarray(conf)
+            if conf.ndim == 4 and conf.shape[0] == 1:
+                conf = np.squeeze(conf, axis=0)
+            if conf.ndim == 3 and conf.shape[0] == 1:
+                conf = np.squeeze(conf, axis=0)
+            if conf.ndim == 3 and conf.shape[-1] == 1:
+                conf = np.squeeze(conf, axis=-1)
+            if conf.ndim != 2:
+                conf = None
+        if conf is not None and depth.ndim == 3 and conf.shape != depth.shape[-2:]:
+            conf = cv2.resize(conf, (depth.shape[-1], depth.shape[-2]), interpolation=cv2.INTER_LINEAR)
+
+        return {"depth": depth, "conf": conf}
 
     def _predict_batch_mapanything(self, image_paths):
-        outputs = []
+        depth_list = []
+        conf_list = []
         for image_path in image_paths:
             views = load_images([str(image_path)])
             with torch.no_grad():
@@ -353,11 +486,32 @@ class PredictMetricInfer:
                 raise RuntimeError(
                     "[ERROR] Unexpected mapanything depth shape for {}: {}".format(image_path, depth.shape)
                 )
-            outputs.append(depth)
-        return np.stack(outputs, axis=0)
+            depth_list.append(depth)
+
+            conf = pred_list[0].get("conf")
+            if conf is not None:
+                if isinstance(conf, torch.Tensor):
+                    conf = conf.detach().cpu().numpy()
+                conf = np.asarray(conf, dtype=np.float32)
+                conf = np.squeeze(conf)
+                if conf.ndim == 3:
+                    if conf.shape[0] == 1:
+                        conf = conf[0]
+                    elif conf.shape[-1] == 1:
+                        conf = conf[..., 0]
+                if conf.ndim != 2:
+                    conf = None
+            conf_list.append(conf)
+
+        depths = np.stack(depth_list, axis=0)
+        confs = None
+        if all(c is not None for c in conf_list):
+            confs = np.stack(conf_list, axis=0)
+        return {"depth": depths, "conf": confs}
 
     def _predict_batch_pi3(self, image_paths):
-        outputs = []
+        depth_list = []
+        conf_list = []
         for image_path in image_paths:
             images = load_images_as_tensor_pi_long([str(image_path)]).to(self.device)
             with torch.no_grad():
@@ -374,11 +528,31 @@ class PredictMetricInfer:
                 depth = np.squeeze(depth, axis=0)
             if depth.ndim == 3 and depth.shape[0] == 1:
                 depth = np.squeeze(depth, axis=0)
-            outputs.append(depth)
-        return np.stack(outputs, axis=0)
+            depth_list.append(depth)
+
+            conf = res.get("conf")
+            if conf is not None:
+                conf = torch.sigmoid(conf[..., 0])
+                if isinstance(conf, torch.Tensor):
+                    conf = conf.detach().cpu().numpy()
+                conf = np.asarray(conf)
+                if conf.ndim == 4 and conf.shape[0] == 1:
+                    conf = np.squeeze(conf, axis=0)
+                if conf.ndim == 3 and conf.shape[0] == 1:
+                    conf = np.squeeze(conf, axis=0)
+                if conf.ndim != 2:
+                    conf = None
+            conf_list.append(conf)
+
+        depths = np.stack(depth_list, axis=0)
+        confs = None
+        if all(c is not None for c in conf_list):
+            confs = np.stack(conf_list, axis=0)
+        return {"depth": depths, "conf": confs}
 
     def _predict_batch_vggt(self, image_paths):
-        outputs = []
+        depth_list = []
+        conf_list = []
         for image_path in image_paths:
             images = load_and_preprocess_images([str(image_path)]).to(self.device)
             with torch.no_grad():
@@ -395,8 +569,178 @@ class PredictMetricInfer:
             depth = np.asarray(depth)
             if depth.ndim == 3 and depth.shape[0] == 1:
                 depth = np.squeeze(depth, axis=0)
-            outputs.append(depth)
-        return np.stack(outputs, axis=0)
+            depth_list.append(depth)
+
+            conf = pred.get("depth_conf", pred.get("world_points_conf"))
+            if conf is not None:
+                if isinstance(conf, torch.Tensor):
+                    conf = conf.detach().cpu().numpy()
+                conf = np.asarray(conf)
+                if conf.ndim == 3 and conf.shape[0] == 1:
+                    conf = np.squeeze(conf, axis=0)
+                if conf.ndim != 2:
+                    conf = None
+            conf_list.append(conf)
+
+        depths = np.stack(depth_list, axis=0)
+        confs = None
+        if all(c is not None for c in conf_list):
+            confs = np.stack(conf_list, axis=0)
+        return {"depth": depths, "conf": confs}
+
+    def _predict_batch_da3_single(self, image_paths):
+        depth_list = []
+        conf_list = []
+        for image_path in image_paths:
+            with torch.no_grad():
+                if torch.cuda.is_available():
+                    with torch.amp.autocast("cuda", dtype=self.dtype):
+                        prediction = self.model.inference([str(image_path)])
+                else:
+                    prediction = self.model.inference([str(image_path)])
+            depth = prediction.depth
+            if isinstance(depth, torch.Tensor):
+                depth = depth.detach().cpu().numpy()
+            else:
+                depth = np.asarray(depth)
+            if depth.ndim == 3 and depth.shape[0] == 1:
+                depth = np.squeeze(depth, axis=0)
+            if depth.ndim == 3 and depth.shape[-1] == 1:
+                depth = np.squeeze(depth, axis=-1)
+            depth_list.append(depth)
+            conf = None
+            if hasattr(prediction, "depth_conf"):
+                conf = prediction.depth_conf
+            elif hasattr(prediction, "conf"):
+                conf = prediction.conf
+            if conf is not None:
+                if isinstance(conf, torch.Tensor):
+                    conf = conf.detach().cpu().numpy()
+                else:
+                    conf = np.asarray(conf)
+                if conf.ndim == 3 and conf.shape[0] == 1:
+                    conf = np.squeeze(conf, axis=0)
+                if conf.ndim == 3 and conf.shape[-1] == 1:
+                    conf = np.squeeze(conf, axis=-1)
+                if conf.ndim != 2:
+                    conf = None
+            conf_list.append(conf)
+        depths = np.stack(depth_list, axis=0)
+        confs = None
+        if all(c is not None for c in conf_list):
+            confs = np.stack(conf_list, axis=0)
+        return {"depth": depths, "conf": confs}
+
+    def _predict_da3_multiview(self, target_samples, all_samples_for_cam):
+        if self._name_to_params is None:
+            logger.warning("[WARN] No camera params loaded, falling back to single-view DA3")
+            return self._predict_batch_da3_single([s["image_path"] for s in target_samples])
+
+        depth_list = []
+        conf_list = []
+
+        n_neighbors = self.multiview_num_neighbors
+        half_n = n_neighbors // 2
+
+        sample_idx_map = {s["stem"]: idx for idx, s in enumerate(all_samples_for_cam)}
+
+        for target_sample in target_samples:
+            target_stem = target_sample["stem"]
+            target_idx = sample_idx_map.get(target_stem)
+            if target_idx is None:
+                logger.warning("[WARN] Target stem %s not found in camera samples", target_stem)
+                pred = self._predict_batch_da3_single([target_sample["image_path"]])
+                depth_list.append(pred["depth"][0])
+                conf_list.append(pred["conf"][0] if pred["conf"] is not None else None)
+                continue
+
+            start_idx = max(0, target_idx - half_n)
+            end_idx = min(len(all_samples_for_cam), target_idx + half_n + 1)
+            neighbor_samples = all_samples_for_cam[start_idx:end_idx]
+
+            target_local_idx = target_idx - start_idx
+
+            image_paths_list = [str(s["image_path"]) for s in neighbor_samples]
+            extrinsics_list = []
+            intrinsics_list = []
+
+            for s in neighbor_samples:
+                image_name = "{}/{}.png".format(s["cam_id"], s["stem"])
+                param_pair = self._name_to_params.get(image_name)
+                if param_pair is None:
+                    logger.warning("[WARN] No camera params for %s, falling back to single-view", image_name)
+                    pred = self._predict_batch_da3_single([target_sample["image_path"]])
+                    depth_list.append(pred["depth"][0])
+                    conf_list.append(pred["conf"][0] if pred["conf"] is not None else None)
+                    break
+                cam_param, img_param = param_pair
+                w2c = build_w2c_extrinsic_from_whuomvs(img_param.Rwc, img_param.twc)
+                K = build_intrinsic_3x3(cam_param.fx, cam_param.fy, cam_param.cx, cam_param.cy)
+                extrinsics_list.append(w2c.astype(np.float32))
+                intrinsics_list.append(K.astype(np.float32))
+            else:
+                extrinsics_arr = np.stack(extrinsics_list, axis=0)
+                intrinsics_arr = np.stack(intrinsics_list, axis=0)
+
+                logger.info(
+                    "[INFO] DA3 multi-view: target=%s, %d views (target at index %d)",
+                    target_stem, len(neighbor_samples), target_local_idx,
+                )
+
+                with torch.no_grad():
+                    if torch.cuda.is_available():
+                        with torch.amp.autocast("cuda", dtype=self.dtype):
+                            prediction = self.model.inference(
+                                image=image_paths_list,
+                                extrinsics=extrinsics_arr,
+                                intrinsics=intrinsics_arr,
+                                process_res=self.multiview_process_res,
+                                ref_view_strategy=self.multiview_ref_strategy,
+                            )
+                    else:
+                        prediction = self.model.inference(
+                            image=image_paths_list,
+                            extrinsics=extrinsics_arr,
+                            intrinsics=intrinsics_arr,
+                            process_res=self.multiview_process_res,
+                            ref_view_strategy=self.multiview_ref_strategy,
+                        )
+
+                depth = prediction.depth
+                if isinstance(depth, torch.Tensor):
+                    depth = depth.detach().cpu().numpy()
+                else:
+                    depth = np.asarray(depth)
+
+                target_depth = depth[target_local_idx]
+                if target_depth.ndim == 3 and target_depth.shape[0] == 1:
+                    target_depth = np.squeeze(target_depth, axis=0)
+                if target_depth.ndim == 3 and target_depth.shape[-1] == 1:
+                    target_depth = np.squeeze(target_depth, axis=-1)
+                depth_list.append(target_depth)
+
+                conf = None
+                if hasattr(prediction, "depth_conf") and prediction.depth_conf is not None:
+                    conf = prediction.depth_conf
+                    if isinstance(conf, torch.Tensor):
+                        conf = conf.detach().cpu().numpy()
+                    else:
+                        conf = np.asarray(conf)
+                    target_conf = conf[target_local_idx]
+                    if target_conf.ndim == 3 and target_conf.shape[0] == 1:
+                        target_conf = np.squeeze(target_conf, axis=0)
+                    if target_conf.ndim == 3 and target_conf.shape[-1] == 1:
+                        target_conf = np.squeeze(target_conf, axis=-1)
+                    conf = target_conf if target_conf.ndim == 2 else None
+                conf_list.append(conf)
+
+                continue
+
+        depths = np.stack(depth_list, axis=0)
+        confs = None
+        if all(c is not None for c in conf_list):
+            confs = np.stack(conf_list, axis=0)
+        return {"depth": depths, "conf": confs}
 
     def _prepare_prediction(self, pred_depth, gt_depth):
         pred_depth = np.asarray(pred_depth, dtype=np.float32)
@@ -468,15 +812,51 @@ class PredictMetricInfer:
 
             for start_idx in range(0, len(samples), self.batch_size):
                 batch_samples = samples[start_idx : start_idx + self.batch_size]
-                batch_images = [s["image_path"] for s in batch_samples]
-                batch_predictions = self._predict_batch(batch_images)
+
+                if self.model_name == "depthanything3" and self.multiview_num_neighbors > 0:
+                    batch_predictions = self._predict_da3_multiview(batch_samples, samples)
+                else:
+                    batch_images = [s["image_path"] for s in batch_samples]
+                    batch_predictions = self._predict_batch(batch_images)
 
                 for batch_index, sample in enumerate(batch_samples):
-                    pred_depth = batch_predictions[batch_index]
+                    batch_pred = batch_predictions
+                    if isinstance(batch_pred, dict):
+                        pred_depth = batch_pred["depth"][batch_index] if batch_pred["depth"].ndim == 3 else batch_pred["depth"]
+                        pred_conf = batch_pred.get("conf")
+                        if pred_conf is not None:
+                            pred_conf = pred_conf[batch_index] if pred_conf.ndim == 3 else pred_conf
+                        else:
+                            pred_conf = None
+                    else:
+                        pred_depth = batch_pred[batch_index]
+                        pred_conf = None
                     gt_depth = _load_exr_single_channel(sample["depth_path"])
                     mask = np.ones(gt_depth.shape, dtype=np.float32)
                     pred_depth = self._prepare_prediction(pred_depth, gt_depth)
-                    cam_accumulator.update(pred_depth, gt_depth, mask)
+
+                    if pred_conf is not None and pred_conf.shape != gt_depth.shape:
+                        pred_conf = cv2.resize(pred_conf, (gt_depth.shape[1], gt_depth.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+                    if self.depth_align_method == "median":
+                        pred_depth_aligned, depth_scale = align_depth_median(pred_depth, gt_depth)
+                    elif self.depth_align_method == "least_squares":
+                        pred_depth_aligned, depth_scale = align_depth_least_squares(pred_depth, gt_depth)
+                    elif self.depth_align_method == "affine":
+                        pred_depth_aligned, depth_scale, depth_shift = align_depth_affine(pred_depth, gt_depth)
+                    elif self.depth_align_method == "multiview_metric":
+                        pred_depth_aligned = pred_depth
+                        depth_scale = 1.0
+                    else:
+                        pred_depth_aligned = pred_depth
+                        depth_scale = 1.0
+
+                    cam_accumulator.update(pred_depth_aligned, gt_depth, mask)
+
+                    if self.save_adamvs_format and self.adamvs_output_path is not None:
+                        self._save_adamvs_format(
+                            pred_depth_aligned, pred_conf, gt_depth, cam_id, sample
+                        )
 
                     if self.eval_dsm and self._name_to_params is not None and self._dsm_grid is not None:
                         image_name = "{}/{}.png".format(cam_id, sample["stem"])
@@ -486,13 +866,13 @@ class PredictMetricInfer:
                             downsample_factor = cam_param.width / gt_depth.shape[1]
 
                             elevation_error, valid_mask = compute_elevation_error_per_pixel(
-                                pred_depth, gt_depth, cam_param, img_param,
+                                pred_depth_aligned, gt_depth, cam_param, img_param,
                                 downsample_factor=downsample_factor,
                             )
                             cam_dsm_accumulator.update(elevation_error, valid_mask)
 
                             pred_dsm_i = depth_to_dsm(
-                                pred_depth, cam_param, img_param,
+                                pred_depth_aligned, cam_param, img_param,
                                 self._dsm_grid, downsample_factor=downsample_factor,
                             )
                             gt_dsm_i = depth_to_dsm(
@@ -519,7 +899,7 @@ class PredictMetricInfer:
                     if self.eval_normal and sample["normal_path"] is not None:
                         gt_normal = _load_exr_normals(sample["normal_path"])
                         gt_normal_resized = gt_normal
-                        pred_normal = self._depth_to_normal(pred_depth)
+                        pred_normal = self._depth_to_normal(pred_depth_aligned)
                         if pred_normal.shape[:2] != gt_normal_resized.shape[:2]:
                             pred_normal = cv2.resize(
                                 pred_normal, (gt_normal_resized.shape[1], gt_normal_resized.shape[0]),
@@ -641,6 +1021,74 @@ class PredictMetricInfer:
             "per_camera": per_camera_results,
             "overall": overall_result,
         }
+
+    def _save_adamvs_format(
+        self,
+        pred_depth: np.ndarray,
+        pred_conf: Optional[np.ndarray],
+        gt_depth: np.ndarray,
+        cam_id: str,
+        sample: Dict,
+    ) -> None:
+        stem = sample["stem"]
+        image_path = sample["image_path"]
+        cam_dir = self.adamvs_output_path / cam_id
+        cam_dir.mkdir(parents=True, exist_ok=True)
+
+        save_pfm(str(cam_dir / "{}_init.pfm".format(stem)), pred_depth.astype(np.float32))
+
+        if pred_conf is not None:
+            conf_save = pred_conf.astype(np.float32)
+            if conf_save.max() > 1.0:
+                conf_save = conf_save / conf_save.max()
+            save_pfm(str(cam_dir / "{}_prob.pfm".format(stem)), conf_save)
+        else:
+            ones_conf = np.ones_like(pred_depth, dtype=np.float32)
+            save_pfm(str(cam_dir / "{}_prob.pfm".format(stem)), ones_conf)
+
+        image_name = "{}/{}.png".format(cam_id, stem)
+        param_pair = self._name_to_params.get(image_name) if self._name_to_params else None
+
+        if param_pair is not None:
+            cam_param, img_param = param_pair
+            O_xrightyup = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float64)
+            Rwc_down = img_param.Rwc @ O_xrightyup
+            extrinsic_wc = np.eye(4, dtype=np.float64)
+            extrinsic_wc[:3, :3] = Rwc_down
+            extrinsic_wc[:3, 3] = img_param.twc
+            extrinsic_cw = np.linalg.inv(extrinsic_wc)
+
+            intrinsic = np.zeros((3, 3), dtype=np.float64)
+            intrinsic[0, 0] = cam_param.fx
+            intrinsic[1, 1] = cam_param.fy
+            intrinsic[0, 2] = cam_param.cx
+            intrinsic[1, 2] = cam_param.cy
+            intrinsic[2, 2] = 1.0
+
+            depth_min = float(img_param.min_depth) if img_param.min_depth > 0 else float(np.nanmin(pred_depth[pred_depth > 1e-8]))
+            depth_max = float(img_param.max_depth) if img_param.max_depth > 0 else float(np.nanmax(pred_depth[pred_depth > 1e-8]))
+        else:
+            extrinsic_cw = np.eye(4, dtype=np.float64)
+            intrinsic = np.eye(3, dtype=np.float64)
+            valid_depth = pred_depth[pred_depth > 1e-8]
+            depth_min = float(np.nanmin(valid_depth)) if len(valid_depth) > 0 else 0.0
+            depth_max = float(np.nanmax(valid_depth)) if len(valid_depth) > 0 else 1.0
+
+        write_adamvs_cam(
+            str(cam_dir / "{}.txt".format(stem)),
+            extrinsic_cw.astype(np.float32),
+            intrinsic.astype(np.float32),
+            depth_min,
+            depth_max,
+            num_depth=192,
+            ref_image_path=str(image_path),
+        )
+
+        try:
+            img = Image.open(str(image_path))
+            img.save(str(cam_dir / "{}.jpg".format(stem)), "JPEG", quality=95)
+        except Exception as e:
+            logger.warning("[WARN] Failed to save reference image %s: %s", image_path, e)
 
     @staticmethod
     def _depth_to_normal(depth_map: np.ndarray) -> np.ndarray:
@@ -828,6 +1276,43 @@ def parse_args():
         choices=["depthanything3", "mapanything", "pi3", "vggt"],
         help="Model name override. If provided, it supersedes Model.name in config.",
     )
+    parser.add_argument(
+        "--save_adamvs_format",
+        action="store_true",
+        help="Save predictions in Ada-MVS output format (PFM depth/conf, TXT cam params, JPG image).",
+    )
+    parser.add_argument(
+        "--adamvs_output_path",
+        type=str,
+        default=None,
+        help="Output directory for Ada-MVS format files. Defaults to <output_path>/adamvs_output.",
+    )
+    parser.add_argument(
+        "--depth_align_method",
+        type=str,
+        default="median",
+        choices=["none", "median", "least_squares", "affine", "multiview_metric"],
+        help="Method to align relative depth to absolute metric depth using GT. 'affine' uses GT=a*pred+b. 'multiview_metric' uses DA3 multi-view metric depth (no GT alignment).",
+    )
+    parser.add_argument(
+        "--multiview_num_neighbors",
+        type=int,
+        default=0,
+        help="Number of neighboring views for DA3 multi-view inference. 0=disabled (single-view). E.g., 5 means 2 before + target + 2 after.",
+    )
+    parser.add_argument(
+        "--multiview_process_res",
+        type=int,
+        default=504,
+        help="Processing resolution for DA3 multi-view inference. Default: 504.",
+    )
+    parser.add_argument(
+        "--multiview_ref_strategy",
+        type=str,
+        default="saddle_balanced",
+        choices=["first", "middle", "saddle_balanced", "saddle_sim_range"],
+        help="Reference view strategy for DA3 multi-view inference. Default: saddle_balanced.",
+    )
     parser.add_argument("--log_level", type=str, default="INFO", help="Python logging level.")
     return parser.parse_args()
 
@@ -850,6 +1335,10 @@ def main():
     camera_ids = args.camera_ids if args.camera_ids else ["1", "2", "3", "4", "5"]
     eval_dsm = args.eval_dsm and not args.no_eval_dsm
 
+    adamvs_output_path = args.adamvs_output_path
+    if adamvs_output_path is None and args.save_adamvs_format:
+        adamvs_output_path = str(output_path / "adamvs_output")
+
     runner = PredictMetricInfer(
         cfg=cfg,
         dataset_path=dataset_path,
@@ -859,6 +1348,12 @@ def main():
         eval_normal=args.eval_normal,
         outlier_threshold=args.outlier_threshold,
         eval_dsm=eval_dsm,
+        save_adamvs_format=args.save_adamvs_format,
+        adamvs_output_path=adamvs_output_path,
+        depth_align_method=args.depth_align_method,
+        multiview_num_neighbors=args.multiview_num_neighbors,
+        multiview_process_res=args.multiview_process_res,
+        multiview_ref_strategy=args.multiview_ref_strategy,
     )
     results = runner.run()
     _print_results(results)
