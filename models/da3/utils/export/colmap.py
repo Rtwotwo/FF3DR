@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,8 +20,8 @@ import numpy as np
 
 from PIL import Image
 
-from depth_anything_3.specs import Prediction
-from depth_anything_3.utils.logger import logger
+from da3.specs import Prediction
+from da3.utils.logger import logger
 
 from .glb import _depths_to_world_points_with_colors
 

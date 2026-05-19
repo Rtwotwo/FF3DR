@@ -1,3 +1,4 @@
+from __future__ import annotations
 # flake8: noqa E501
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
@@ -18,13 +19,33 @@ import torch
 import torch.nn as nn
 from addict import Dict
 
-from depth_anything_3.model.dpt import _make_fusion_block, _make_scratch
-from depth_anything_3.model.utils.head_utils import (
+from da3.model.dpt import _make_fusion_block, _make_scratch
+from da3.model.metric_adapter import MetricAdapterV3
+from da3.model.utils.head_utils import (
     Permute,
     create_uv_grid,
     custom_interpolate,
     position_grid_to_embed,
 )
+
+
+class MetricDepthHead(nn.Module):
+    def __init__(self, feat_dim: int = 128, hidden_dim: int = 64):
+        super().__init__()
+        self.conv1 = nn.Conv2d(feat_dim + 1, hidden_dim, 3, 1, 1)
+        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
+        self.conv3 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
+        self.conv_out = nn.Conv2d(hidden_dim, 1, 1, 1, 0)
+        self.gelu = nn.GELU()
+        nn.init.zeros_(self.conv_out.weight)
+        nn.init.zeros_(self.conv_out.bias)
+
+    def forward(self, fused_feat: torch.Tensor, relative_depth: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([fused_feat, relative_depth.unsqueeze(1)], dim=1)
+        x = self.gelu(self.conv1(x))
+        x = self.gelu(self.conv2(x))
+        x = self.gelu(self.conv3(x))
+        return self.conv_out(x).squeeze(1)
 
 
 class DualDPT(nn.Module):
@@ -56,6 +77,8 @@ class DualDPT(nn.Module):
         aux_pyramid_levels: int = 4,
         aux_out1_conv_num: int = 5,
         head_names: Tuple[str, str] = ("depth", "ray"),
+        metric_adapter_hidden_dim: int = 64,
+        metric_depth_norm: float = 600.0,
     ) -> None:
         super().__init__()
 
@@ -115,6 +138,13 @@ class DualDPT(nn.Module):
             nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(head_features_2, output_dim, kernel_size=1, stride=1, padding=0),
+        )
+
+        # Metric depth adapter: residual + per-image scale/shift
+        self.metric_adapter = MetricAdapterV3(
+            feat_dim=head_features_1 // 2,
+            hidden_dim=metric_adapter_hidden_dim,
+            depth_norm=metric_depth_norm,
         )
 
         # Auxiliary fusion chain (completely separate; no sharing, i.e., "fusion_inplace=False")
@@ -246,6 +276,13 @@ class DualDPT(nn.Module):
         main_pred = self._apply_activation_single(fmap[..., :-1], self.activation)
         main_conf = self._apply_activation_single(fmap[..., -1], self.conf_activation)
 
+        # Metric depth: residual correction + per-image scale/shift offsets
+        if hasattr(self, "metric_adapter") and self.metric_adapter is not None:
+            metric_residual, metric_log_scale, metric_shift = self.metric_adapter(
+                fused_main, main_pred.squeeze(-1)
+            )
+            main_pred = main_pred + metric_residual.unsqueeze(-1)
+
         # Auxiliary head (multi-level inside) -> only last level returned (after activation)
         last_aux = fused_aux_pyr[-1]
         if self.pos_embed:
@@ -256,12 +293,16 @@ class DualDPT(nn.Module):
         fmap_last = last_aux_logits.permute(0, 2, 3, 1)
         aux_pred = self._apply_activation_single(fmap_last[..., :-1], "linear")
         aux_conf = self._apply_activation_single(fmap_last[..., -1], self.conf_activation)
-        return {
+        out = {
             self.head_main: main_pred.squeeze(-1),
             f"{self.head_main}_conf": main_conf,
             self.head_aux: aux_pred,
             f"{self.head_aux}_conf": aux_conf,
         }
+        if hasattr(self, "metric_adapter") and self.metric_adapter is not None:
+            out["metric_log_scale"] = metric_log_scale
+            out["metric_shift"] = metric_shift
+        return out
 
     # -------------------------------------------------------------------------
     # Subroutines

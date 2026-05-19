@@ -18,6 +18,7 @@
 Depth Anything 3 Gallery Server (two-level, single-file)
 Now supports paginated depth preview (4 per page).
 """
+from __future__ import annotations
 
 import argparse
 import json

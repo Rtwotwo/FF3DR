@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,10 +26,10 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import torch
 
-from depth_anything_3.api import DepthAnything3
-from depth_anything_3.utils.memory import cleanup_cuda_memory
-from depth_anything_3.utils.export.glb import export_to_glb
-from depth_anything_3.utils.export.gs import export_to_gs_video
+from da3.api import DepthAnything3
+from da3.utils.memory import cleanup_cuda_memory
+from da3.utils.export.glb import export_to_glb
+from da3.utils.export.gs import export_to_gs_video
 
 
 class ModelInference:

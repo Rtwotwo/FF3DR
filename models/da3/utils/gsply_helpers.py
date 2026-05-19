@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +20,7 @@ from einops import rearrange, repeat
 from plyfile import PlyData, PlyElement
 from torch import Tensor
 
-from depth_anything_3.specs import Gaussians
+from da3.specs import Gaussians
 
 
 def construct_list_of_attributes(num_rest: int) -> list[str]:

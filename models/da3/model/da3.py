@@ -19,9 +19,9 @@ import torch.nn as nn
 from addict import Dict
 from omegaconf import DictConfig, OmegaConf
 
-from depth_anything_3.cfg import create_object
-from depth_anything_3.model.utils.transform import pose_encoding_to_extri_intri
-from depth_anything_3.utils.alignment import (
+from da3.cfg import create_object
+from da3.model.utils.transform import pose_encoding_to_extri_intri
+from da3.utils.alignment import (
     apply_metric_scaling,
     compute_alignment_mask,
     compute_sky_mask,
@@ -29,8 +29,8 @@ from depth_anything_3.utils.alignment import (
     sample_tensor_for_quantile,
     set_sky_regions_to_max_depth,
 )
-from depth_anything_3.utils.geometry import affine_inverse, as_homogeneous, map_pdf_to_opacity
-from depth_anything_3.utils.ray_utils import get_extrinsic_from_camray
+from da3.utils.geometry import affine_inverse, as_homogeneous, map_pdf_to_opacity
+from da3.utils.ray_utils import get_extrinsic_from_camray
 
 
 def _wrap_cfg(cfg_obj):

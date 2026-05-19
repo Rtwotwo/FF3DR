@@ -24,7 +24,7 @@ def get_all_models() -> OrderedDict:
     """
     # Get path to the configs directory within the da3 package
     # Works both in development and after pip installation
-    # configs_dir = files("depth_anything_3").joinpath("configs")
+    # configs_dir = files("da3").joinpath("configs")
     configs_dir = Path(__file__).resolve().parent / "configs"
 
     # Ensure path is a Path object for consistent cross-platform handling

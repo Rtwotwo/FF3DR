@@ -1,11 +1,11 @@
 __object__:
-  path: depth_anything_3.model.da3
+  path: da3.model.da3
   name: DepthAnything3Net
   args: as_params
 
 net:
   __object__:
-    path: depth_anything_3.model.dinov2.dinov2
+    path: da3.model.dinov2.dinov2
     name: DinoV2
     args: as_params
 
@@ -18,7 +18,7 @@ net:
 
 head:
   __object__:
-    path: depth_anything_3.model.dualdpt
+    path: da3.model.dualdpt
     name: DualDPT
     args: as_params
 
@@ -26,11 +26,13 @@ head:
   output_dim: 2
   features: &head_features 256
   out_channels: &head_out_channels [256, 512, 1024, 1024]
+  metric_adapter_hidden_dim: 64
+  metric_depth_norm: 600.0
 
 
 cam_enc:
   __object__:
-    path: depth_anything_3.model.cam_enc
+    path: da3.model.cam_enc
     name: CameraEnc
     args: as_params
 
@@ -38,7 +40,7 @@ cam_enc:
 
 cam_dec:
   __object__:
-    path: depth_anything_3.model.cam_dec
+    path: da3.model.cam_dec
     name: CameraDec
     args: as_params
 

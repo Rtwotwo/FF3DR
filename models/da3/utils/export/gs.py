@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,11 +18,11 @@ from typing import Literal, Optional
 import moviepy.editor as mpy
 import torch
 
-from depth_anything_3.model.utils.gs_renderer import run_renderer_in_chunk_w_trj_mode
-from depth_anything_3.specs import Prediction
-from depth_anything_3.utils.gsply_helpers import save_gaussian_ply
-from depth_anything_3.utils.layout_helpers import hcat, vcat
-from depth_anything_3.utils.visualize import vis_depth_map_tensor
+from da3.model.utils.gs_renderer import run_renderer_in_chunk_w_trj_mode
+from da3.specs import Prediction
+from da3.utils.gsply_helpers import save_gaussian_ply
+from da3.utils.layout_helpers import hcat, vcat
+from da3.utils.visualize import vis_depth_map_tensor
 
 VIDEO_QUALITY_MAP = {
     "low": {"crf": "28", "preset": "veryfast"},

@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +20,7 @@ Model loading and state dict conversion utilities.
 from typing import Dict, Tuple
 import torch
 
-from depth_anything_3.utils.logger import logger
+from da3.utils.logger import logger
 
 
 def convert_general_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:

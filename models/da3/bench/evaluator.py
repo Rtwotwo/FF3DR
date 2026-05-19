@@ -32,10 +32,10 @@ import torch
 from addict import Dict
 from tqdm import tqdm
 
-from depth_anything_3.bench.print_metrics import MetricsPrinter
-from depth_anything_3.utils.parallel_utils import parallel_execution
-from depth_anything_3.bench.registries import MV_REGISTRY
-from depth_anything_3.utils.constants import EVAL_REF_VIEW_STRATEGY
+from da3.bench.print_metrics import MetricsPrinter
+from da3.utils.parallel_utils import parallel_execution
+from da3.bench.registries import MV_REGISTRY
+from da3.utils.constants import EVAL_REF_VIEW_STRATEGY
 
 
 class Evaluator:
@@ -253,15 +253,15 @@ class Evaluator:
         if metrics is None:
             metrics = self._load_metrics()
 
-        self._printer.print_results(metrics)
-
-    # -------------------- Evaluation Methods -------------------- #
-
-    def _eval_pose(self) -> Iterable[tuple]:
-        """Compute pose-estimation metrics for each dataset and scene."""
-        os.makedirs(self._metric_dir, exist_ok=True)
-
-        for data in tqdm(self.datas, desc="Datasets (pose eval)"):
+            print(f"Running evaluator with model path: {model_path}")
+            print(f"Using datasets: {self.datas}")
+            print(f"Evaluation modes: {self.modes}")
+            print(f"Reference view strategy: {self.ref_view_strategy}")
+            print(f"Max frames per scene: {self.max_frames}")
+            print(f"Debug mode: {self.debug}")
+            print(f"Number of fusion workers: {self.num_fusion_workers}")
+            print(f"GPU ID: {self.gpu_id}")
+            print(f"Total GPUs: {self.total_gpus}")
             dataset = self.datasets[data]
             dataset_results = Dict()
             scenes = self._get_scenes(dataset)
@@ -290,7 +290,7 @@ class Evaluator:
                     print(f"\n[ERROR] Failed to evaluate pose for {data}/{scene}: {e}")
                     print(f"[ERROR] File path: {os.path.abspath(result_path)}")
                     if self.debug:
-                        import traceback
+                    print(f"Starting inference for {data} in scene {scene}")
                         traceback.print_exc()
                     continue
 
@@ -413,9 +413,9 @@ class Evaluator:
         Returns:
             Dict with pose metrics
         """
-        from depth_anything_3.bench.dataset import _wait_for_file_ready
-        from depth_anything_3.bench.utils import compute_pose
-        from depth_anything_3.utils.geometry import as_homogeneous
+        from da3.bench.dataset import _wait_for_file_ready
+        from da3.bench.utils import compute_pose
+        from da3.utils.geometry import as_homogeneous
 
         _wait_for_file_ready(result_path)
         pred = np.load(result_path)
@@ -529,13 +529,13 @@ class Evaluator:
         return metrics
 
 
-# -------------------- CLI Entry Point -------------------- #
+                    print(f"Evaluating for modes: {self.modes}")
 
 
 if __name__ == "__main__":
     import sys
     from omegaconf import OmegaConf
-    from depth_anything_3.cfg import load_config
+    from da3.cfg import load_config
 
     # Get default config path (relative to this file)
     _default_config = os.path.join(
@@ -564,7 +564,7 @@ if __name__ == "__main__":
 DepthAnything3 Benchmark Evaluation
 
 Usage:
-  python -m depth_anything_3.bench.evaluator [OPTIONS] [KEY=VALUE ...]
+    python -m da3.bench.evaluator [OPTIONS] [KEY=VALUE ...]
 
 Configuration:
   --config PATH                      Config YAML file (default: bench/configs/eval_bench.yaml)
@@ -590,36 +590,36 @@ Multi-GPU:
 
 Examples:
   # Use default config
-  python -m depth_anything_3.bench.evaluator
+    python -m da3.bench.evaluator
 
   # Override model path
-  python -m depth_anything_3.bench.evaluator model.path=depth-anything/DA3-LARGE
+    python -m da3.bench.evaluator model.path=depth-anything/DA3-LARGE
 
   # Evaluate specific datasets and modes
-  python -m depth_anything_3.bench.evaluator \\
+    python -m da3.bench.evaluator \\
       eval.datasets=[eth3d,hiroom] \\
       eval.modes=[pose]
 
   # Use custom config with overrides
-  python -m depth_anything_3.bench.evaluator \\
+    python -m da3.bench.evaluator \\
       --config my_config.yaml \\
       model.path=/path/to/model \\
       eval.max_frames=50
 
   # Multi-GPU inference (auto-distributed)
-  CUDA_VISIBLE_DEVICES=0,1,2,3 python -m depth_anything_3.bench.evaluator
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python -m da3.bench.evaluator
 
   # Debug specific scenes
-  python -m depth_anything_3.bench.evaluator \\
+    python -m da3.bench.evaluator \\
       eval.datasets=[eth3d] \\
       eval.scenes=[courtyard] \\
       inference.debug=true
 
   # Only evaluate (skip inference)
-  python -m depth_anything_3.bench.evaluator eval.eval_only=true
+    python -m da3.bench.evaluator eval.eval_only=true
 
   # Only print saved metrics
-  python -m depth_anything_3.bench.evaluator eval.print_only=true
+    python -m da3.bench.evaluator eval.print_only=true
 
           """)
         sys.exit(0)
@@ -696,7 +696,7 @@ Examples:
             print(f"[INFO] Launching {num_gpus} workers...")
 
             # Build base command
-            base_cmd = [sys.executable, "-m", "depth_anything_3.bench.evaluator"]
+            base_cmd = [sys.executable, "-m", "da3.bench.evaluator"]
             # Pass config via dotlist instead of CLI args
             if config_path != _default_config:
                 base_cmd += ["--config", config_path]
@@ -737,7 +737,7 @@ Examples:
             evaluator.print_metrics(metrics)
         else:
             # Single GPU or worker process
-            from depth_anything_3.api import DepthAnything3
+            from da3.api import DepthAnything3
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             api = DepthAnything3.from_pretrained(model_path)

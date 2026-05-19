@@ -36,16 +36,16 @@ from scipy.io import loadmat
 from sklearn import neighbors as skln
 from tqdm import tqdm
 
-from depth_anything_3.bench.dataset import Dataset
-from depth_anything_3.bench.registries import MONO_REGISTRY, MV_REGISTRY
-from depth_anything_3.utils.constants import (
+from da3.bench.dataset import Dataset
+from da3.bench.registries import MONO_REGISTRY, MV_REGISTRY
+from da3.utils.constants import (
     DTU_DIST_THRESH,
     DTU_EVAL_DATA_ROOT,
     DTU_MAX_POINTS,
     DTU_NUM_CONSIST,
     DTU_SCENES,
 )
-from depth_anything_3.utils.pose_align import align_poses_umeyama
+from da3.utils.pose_align import align_poses_umeyama
 
 
 @MV_REGISTRY.register(name="dtu")

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from models.depthanything3.model.da3 import DepthAnything3Net, NestedDepthAnything3Net
+from da3.model.da3 import DepthAnything3Net, NestedDepthAnything3Net
 
 __export__ = [
     NestedDepthAnything3Net,

@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 from einops import rearrange
 
-from depth_anything_3.utils.logger import logger
+from da3.utils.logger import logger
 
 from .layers import LayerScale  # noqa: F401
 from .layers import Mlp  # noqa: F401
@@ -26,13 +26,13 @@ from .layers import (  # noqa: F401
     RotaryPositionEmbedding2D,
     SwiGLUFFNFused,
 )
-from depth_anything_3.model.reference_view_selector import (
+from da3.model.reference_view_selector import (
     RefViewStrategy,
     select_reference_view,
     reorder_by_reference,
     restore_original_order,
 )
-from depth_anything_3.utils.constants import THRESH_FOR_REF_SELECTION
+from da3.utils.constants import THRESH_FOR_REF_SELECTION
 
 # logger = logging.getLogger("dinov2")
 

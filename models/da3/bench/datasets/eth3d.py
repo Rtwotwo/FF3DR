@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,16 +37,16 @@ import torch.nn.functional as F
 from addict import Dict
 from PIL import Image
 
-from depth_anything_3.bench.dataset import Dataset, _wait_for_file_ready
-from depth_anything_3.bench.registries import MONO_REGISTRY, MV_REGISTRY
-from depth_anything_3.bench.utils import (
+from da3.bench.dataset import Dataset, _wait_for_file_ready
+from da3.bench.registries import MONO_REGISTRY, MV_REGISTRY
+from da3.bench.utils import (
     create_tsdf_volume,
     evaluate_3d_reconstruction,
     fuse_depth_to_tsdf,
     quat2rotmat,
     sample_points_from_mesh,
 )
-from depth_anything_3.utils.constants import (
+from da3.utils.constants import (
     ETH3D_DOWN_SAMPLE,
     ETH3D_EVAL_DATA_ROOT,
     ETH3D_EVAL_THRESHOLD,
@@ -56,7 +57,7 @@ from depth_anything_3.utils.constants import (
     ETH3D_SDF_TRUNC,
     ETH3D_VOXEL_LENGTH,
 )
-from depth_anything_3.utils.pose_align import align_poses_umeyama
+from da3.utils.pose_align import align_poses_umeyama
 
 
 @MV_REGISTRY.register(name="eth3d")

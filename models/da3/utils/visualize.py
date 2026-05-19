@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from einops import rearrange
 
-from depth_anything_3.utils.logger import logger
+from da3.utils.logger import logger
 
 
 def visualize_depth(
