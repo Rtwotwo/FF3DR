@@ -31,10 +31,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 DATASET_PATH="${PROJECT_ROOT}/dataset/WHU-OMVS/predict"
-OUTPUT_BASE="${PROJECT_ROOT}/exp/whu-omvs/predict_metric_eval"
+OUTPUT_BASE="${PROJECT_ROOT}/exp/whu-omvs/metric_eval_predict"
 
 MODEL_NAMES=("depthanything3" "mapanything" "pi3" "vggt")
 CAMERA_IDS=("1" "2" "3" "4" "5")
@@ -43,7 +43,11 @@ ALIGN_MODE="median"
 OUTLIER_THRESHOLD=20.0
 EVAL_NORMAL=false
 EVAL_DSM=true
-GPU_ID=0
+EVAL_RECON=true
+RECON_THRESHOLD=0.5
+RECON_STRIDE=4
+LORA_CHECKPOINT=""
+GPU_ID=6
 SAVE_ADAMVS_FORMAT=true
 DEPTH_ALIGN_METHOD="median"
 ADAMVS_OUTPUT_PATH=""
@@ -62,6 +66,10 @@ while [[ $# -gt 0 ]]; do
         --outlier_threshold)        shift; OUTLIER_THRESHOLD="$1" ;;
         --eval_normal)              shift; EVAL_NORMAL="$1" ;;
         --eval_dsm)                 shift; EVAL_DSM="$1" ;;
+        --eval_recon)               shift; EVAL_RECON="$1" ;;
+        --recon_threshold)          shift; RECON_THRESHOLD="$1" ;;
+        --recon_stride)             shift; RECON_STRIDE="$1" ;;
+        --lora_checkpoint)          shift; LORA_CHECKPOINT="$1" ;;
         --gpu_id)                   shift; GPU_ID="$1" ;;
         --output_base)              shift; OUTPUT_BASE="$1" ;;
         --save_adamvs_format)       shift; SAVE_ADAMVS_FORMAT="$1" ;;
@@ -89,6 +97,9 @@ echo "Depth align method:        ${DEPTH_ALIGN_METHOD}"
 echo "Outlier T:                 ${OUTLIER_THRESHOLD}m"
 echo "Eval normal:               ${EVAL_NORMAL}"
 echo "Eval DSM:                  ${EVAL_DSM}"
+echo "Eval recon:                ${EVAL_RECON}"
+echo "Recon threshold:           ${RECON_THRESHOLD}m"
+echo "Recon stride:              ${RECON_STRIDE}"
 echo "Save Ada-MVS format:       ${SAVE_ADAMVS_FORMAT}"
 echo "Multi-view neighbors:      ${MULTIVIEW_NUM_NEIGHBORS}"
 echo "Multi-view process res:    ${MULTIVIEW_PROCESS_RES}"
@@ -124,6 +135,16 @@ if [[ "${MULTIVIEW_NUM_NEIGHBORS}" -gt 0 ]]; then
     MULTIVIEW_FLAGS="--multiview_num_neighbors ${MULTIVIEW_NUM_NEIGHBORS} --multiview_process_res ${MULTIVIEW_PROCESS_RES} --multiview_ref_strategy ${MULTIVIEW_REF_STRATEGY}"
 fi
 
+EVAL_RECON_FLAG=""
+if [[ "${EVAL_RECON}" == "true" ]]; then
+    EVAL_RECON_FLAG="--eval_recon --recon_threshold ${RECON_THRESHOLD} --recon_stride ${RECON_STRIDE}"
+fi
+
+LORA_FLAG=""
+if [[ -n "${LORA_CHECKPOINT}" ]]; then
+    LORA_FLAG="--lora_checkpoint ${LORA_CHECKPOINT}"
+fi
+
 for MODEL_NAME in "${MODEL_NAMES[@]}"; do
     echo ""
     echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running predict metrics for ${MODEL_NAME}..."
@@ -144,6 +165,8 @@ for MODEL_NAME in "${MODEL_NAMES[@]}"; do
         ${SAVE_ADAMVS_FLAG} \
         ${ADAMVS_OUTPUT_FLAG} \
         ${MULTIVIEW_FLAGS} \
+        ${EVAL_RECON_FLAG} \
+        ${LORA_FLAG} \
         --model_name "${MODEL_NAME}" \
         --output_path "${OUTPUT_DIR}" \
         ${EXTRA_ARGS}

@@ -357,6 +357,12 @@ class MetricInfer:
             "overall": overall_result,
         }
 
+    @property
+    def area_tag(self):
+        if self.areas:
+            return "_".join(self.areas)
+        return "all"
+
 
 def _format_metric(value):
     if value is None or (isinstance(value, float) and not np.isfinite(value)):
@@ -365,22 +371,40 @@ def _format_metric(value):
 
 
 def _print_results(results):
+    headers = ["abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog", "delta1", "delta2", "delta3"]
     overall = results["overall"]
-    print("=" * 92)
+
+    area_names = list(results["areas"].keys())
+    has_multi_areas = len(area_names) > 1
+
+    col_width = 10
+    area_col_width = max(max(len(n) for n in area_names) if area_names else 4, 8)
+    if has_multi_areas:
+        area_col_width = max(area_col_width, len("overall"))
+
+    print("=" * (area_col_width + 3 + len(headers) * (col_width + 3)))
     print("WHU-OMVS Depth Metrics")
-    print("=" * 92)
+    print("=" * (area_col_width + 3 + len(headers) * (col_width + 3)))
     print(
         f"model={results['model_name']} split={results['split']} camera={results['camera_id']} align={results['align_mode']}"
     )
-    print(f"valid_pixels={overall['valid_count']}")
-    print("-" * 92)
-    headers = ["abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog", "delta1", "delta2", "delta3"]
-    print(" | ".join(f"{header:>10}" for header in headers))
-    print(" | ".join(f"{_format_metric(overall[header]):>10}" for header in headers))
-    print("-" * 92)
-    for area_name, area_result in results["areas"].items():
-        values = " | ".join(f"{_format_metric(area_result[header]):>10}" for header in headers)
-        print(f"{area_name:>10}: {values}")
+    print(f"areas={area_names}")
+    print("-" * (area_col_width + 3 + len(headers) * (col_width + 3)))
+
+    print(f"{'':>{area_col_width}} | " + " | ".join(f"{header:>{col_width}}" for header in headers))
+    print("-" * (area_col_width + 3 + len(headers) * (col_width + 3)))
+
+    for area_name in area_names:
+        area_result = results["areas"][area_name]
+        values = " | ".join(f"{_format_metric(area_result[h]):>{col_width}}" for h in headers)
+        print(f"{area_name:>{area_col_width}} | {values}")
+
+    if has_multi_areas:
+        print("-" * (area_col_width + 3 + len(headers) * (col_width + 3)))
+        values = " | ".join(f"{_format_metric(overall[h]):>{col_width}}" for h in headers)
+        print(f"{'overall':>{area_col_width}} | {values}")
+
+    print("=" * (area_col_width + 3 + len(headers) * (col_width + 3)))
 
 
 def parse_args():
@@ -457,7 +481,8 @@ def main():
     results = runner.run()
     _print_results(results)
 
-    output_file = output_path / f"{results['split']}_cam{results['camera_id']}_{results['model_name']}_metrics.json"
+    area_tag = runner.area_tag
+    output_file = output_path / f"{results['split']}_{area_tag}_cam{results['camera_id']}_{results['model_name']}_metrics.json"
     with open(output_file, "w", encoding="utf-8") as file_handle:
         json.dump(results, file_handle, indent=2)
     logger.info("[INFO] Metrics saved to %s", output_file)

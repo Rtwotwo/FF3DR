@@ -143,6 +143,7 @@ from metrics.dsm_metrics import (
     depth_to_dsm,
     build_image_name_to_params,
 )
+from metrics.pointcloud_recon import PointCloudReconAccumulator, load_ply as load_gt_ply, unproject_depth_to_points, compute_recon_metrics_multi_threshold
 from models.depthanything3.api import DepthAnything3
 from models.mapanything.models.mapanything import MapAnything
 from models.mapanything.utils.image import load_images
@@ -267,7 +268,7 @@ class PredictMetricInfer:
       - mean angular error, median angular error
     """
 
-    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced"):
+    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None):
         self.cfg = cfg
         self.dataset_path = Path(dataset_path)
         self.camera_ids = [str(cid) for cid in camera_ids]
@@ -282,6 +283,12 @@ class PredictMetricInfer:
         self.multiview_num_neighbors = int(multiview_num_neighbors)
         self.multiview_process_res = int(multiview_process_res)
         self.multiview_ref_strategy = multiview_ref_strategy
+        self.eval_recon = eval_recon
+        self.recon_threshold = float(recon_threshold)
+        self.recon_stride = int(recon_stride)
+        self.lora_checkpoint = lora_checkpoint
+        self._metric_scale = None
+        self._metric_shift = None
         self.model_name = self.cfg["Model"].get("name", self.cfg["Model"].get("model_name", "depthanything3"))
         if torch.cuda.is_available():
             self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -294,6 +301,10 @@ class PredictMetricInfer:
         self._dsm_grid = None
         if self.eval_dsm or self.save_adamvs_format:
             self._load_dsm_infrastructure()
+
+        self._gt_pointcloud = None
+        if self.eval_recon:
+            self._load_gt_pointcloud()
 
     def _cfg_get_weight(self, model_key, field, fallback_flat_key=None):
         weights = self.cfg.get("Weights", {})
@@ -312,6 +323,10 @@ class PredictMetricInfer:
             model = DepthAnything3(**da3_config)
             state_dict = load_file(da3_weight_path)
             model.load_state_dict(state_dict, strict=False)
+
+            if self.lora_checkpoint is not None:
+                model = self._apply_lora_to_da3(model)
+
         elif self.model_name == "mapanything":
             map_config_path = self._cfg_get_weight("mapanything", "MAP_CONFIG", fallback_flat_key="MAP_CONFIG")
             map_weight_path = self._cfg_get_weight("mapanything", "MAP", fallback_flat_key="MAP")
@@ -343,6 +358,88 @@ class PredictMetricInfer:
         logger.info("[INFO] Model loaded: %s", self.model_name)
         return model
 
+    def _apply_lora_to_da3(self, model):
+        from peft import LoraConfig, get_peft_model
+        from da3.model.metric_adapter import MetricAdapterV3
+
+        ckpt = torch.load(self.lora_checkpoint, map_location="cpu", weights_only=False)
+        ckpt_args = ckpt.get("args", {})
+        lora_rank = ckpt_args.get("lora_rank", 16)
+        lora_alpha = ckpt_args.get("lora_alpha", 32)
+        lora_dropout = ckpt_args.get("lora_dropout", 0.05)
+        lora_target_modules = ckpt_args.get("lora_target_modules", ["qkv", "proj"])
+        adapter_hidden_dim = ckpt_args.get("adapter_hidden_dim", 64)
+        adapter_depth_norm = ckpt_args.get("adapter_depth_norm", 600.0)
+
+        logger.info("[INFO] Applying LoRA: rank=%d alpha=%d dropout=%.3f targets=%s",
+                     lora_rank, lora_alpha, lora_dropout, lora_target_modules)
+
+        lora_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_alpha,
+            target_modules=lora_target_modules,
+            lora_dropout=lora_dropout,
+            bias="none",
+        )
+        model.model = get_peft_model(model.model, lora_config)
+
+        if hasattr(model.model.base_model.model, "head"):
+            head = model.model.base_model.model.head
+            if hasattr(head, "metric_adapter"):
+                feat_dim = head.metric_adapter.residual_conv1.in_channels - 1
+                logger.info("[INFO] Replacing MetricAdapter: feat_dim=%d hidden_dim=%d depth_norm=%.1f",
+                             feat_dim, adapter_hidden_dim, adapter_depth_norm)
+                head.metric_adapter = MetricAdapterV3(
+                    feat_dim=feat_dim,
+                    hidden_dim=adapter_hidden_dim,
+                    depth_norm=adapter_depth_norm,
+                )
+
+        model_sd = ckpt["model_state_dict"]
+        da3_sd = {}
+        for k, v in model_sd.items():
+            if k.startswith("da3."):
+                da3_sd[k[len("da3."):]] = v
+            elif k.startswith("scale_shift."):
+                pass
+            else:
+                da3_sd[k] = v
+
+        missing, unexpected = model.load_state_dict(da3_sd, strict=False)
+        if missing:
+            logger.warning("[WARN] Missing keys when loading LoRA checkpoint (%d): %s",
+                           len(missing), missing[:5])
+        if unexpected:
+            logger.warning("[WARN] Unexpected keys when loading LoRA checkpoint (%d): %s",
+                           len(unexpected), unexpected[:5])
+
+        scale_val = ckpt.get("scale", 1.0)
+        shift_val = ckpt.get("shift_val", 0.0)
+        log_scale_key = "scale_shift.log_scale"
+        shift_key = "scale_shift.shift"
+        if log_scale_key in model_sd:
+            self._metric_scale = float(torch.exp(model_sd[log_scale_key]).item())
+        else:
+            self._metric_scale = float(scale_val)
+        if shift_key in model_sd:
+            self._metric_shift = float(model_sd[shift_key].item())
+        else:
+            self._metric_shift = float(shift_val)
+
+        logger.info("[INFO] LoRA checkpoint loaded: %s", self.lora_checkpoint)
+        logger.info("[INFO] Metric scale=%.4f shift=%.4f", self._metric_scale, self._metric_shift)
+        logger.info("[INFO] Epoch=%d val_mae=%.4f test_mae=%.4f",
+                     ckpt.get("epoch", -1), ckpt.get("val_mae", -1), ckpt.get("test_mae", -1))
+
+        return model
+
+    def _apply_metric_scale_shift(self, depth):
+        if self._metric_scale is None and self._metric_shift is None:
+            return depth
+        scale = self._metric_scale if self._metric_scale is not None else 1.0
+        shift = self._metric_shift if self._metric_shift is not None else 0.0
+        return depth * scale + shift
+
     def _load_dsm_infrastructure(self):
         source_dir = self.dataset_path / "source"
         camera_info_path = source_dir / "camera_info.txt"
@@ -368,6 +465,16 @@ class PredictMetricInfer:
             )
         else:
             logger.warning("[WARN] DSM file not found: %s, will use per-pixel elevation error only", dsm_path)
+
+    def _load_gt_pointcloud(self):
+        gt_ply_path = self.dataset_path / "GT" / "GT_pc" / "gt.ply"
+        if not gt_ply_path.exists():
+            logger.warning("[WARN] GT point cloud not found: %s, disabling recon evaluation", gt_ply_path)
+            self.eval_recon = False
+            return
+        logger.info("[INFO] Loading GT point cloud from %s ...", gt_ply_path)
+        self._gt_pointcloud = load_gt_ply(gt_ply_path)
+        logger.info("[INFO] GT point cloud loaded: %d points", self._gt_pointcloud.shape[0])
 
     def _collect_samples_for_camera(self, cam_id: str) -> List[Dict]:
         image_dir = self.dataset_path / "Images" / cam_id
@@ -450,6 +557,7 @@ class PredictMetricInfer:
         if conf is not None and depth.ndim == 3 and conf.shape != depth.shape[-2:]:
             conf = cv2.resize(conf, (depth.shape[-1], depth.shape[-2]), interpolation=cv2.INTER_LINEAR)
 
+        depth = self._apply_metric_scale_shift(depth)
         return {"depth": depth, "conf": conf}
 
     def _predict_batch_mapanything(self, image_paths):
@@ -629,6 +737,7 @@ class PredictMetricInfer:
         confs = None
         if all(c is not None for c in conf_list):
             confs = np.stack(conf_list, axis=0)
+        depths = self._apply_metric_scale_shift(depths)
         return {"depth": depths, "conf": confs}
 
     def _predict_da3_multiview(self, target_samples, all_samples_for_cam):
@@ -740,6 +849,7 @@ class PredictMetricInfer:
         confs = None
         if all(c is not None for c in conf_list):
             confs = np.stack(conf_list, axis=0)
+        depths = self._apply_metric_scale_shift(depths)
         return {"depth": depths, "conf": confs}
 
     def _prepare_prediction(self, pred_depth, gt_depth):
@@ -776,6 +886,8 @@ class PredictMetricInfer:
             outlier_threshold=self.outlier_threshold,
         ) if self.eval_dsm else None
         overall_normal_metrics = {"mean_ang_error": [], "median_ang_error": [], "normal_valid_count": 0}
+        overall_pred_points_list = []
+        cam_pred_points_map = {}
 
         pred_dsm_sum = None
         pred_dsm_count = None
@@ -852,6 +964,32 @@ class PredictMetricInfer:
                         depth_scale = 1.0
 
                     cam_accumulator.update(pred_depth_aligned, gt_depth, mask)
+
+                    if self.eval_recon and self._gt_pointcloud is not None and self._name_to_params is not None:
+                        image_name = "{}/{}.png".format(cam_id, sample["stem"])
+                        param_pair = self._name_to_params.get(image_name)
+                        if param_pair is not None:
+                            cam_param, img_param = param_pair
+                            downsample_factor = cam_param.width / gt_depth.shape[1]
+                            intrinsic = build_intrinsic_3x3(cam_param.fx, cam_param.fy, cam_param.cx, cam_param.cy)
+                            if downsample_factor > 1.0:
+                                intrinsic_ds = intrinsic.copy()
+                                intrinsic_ds[0, 0] /= downsample_factor
+                                intrinsic_ds[1, 1] /= downsample_factor
+                                intrinsic_ds[0, 2] /= downsample_factor
+                                intrinsic_ds[1, 2] /= downsample_factor
+                            else:
+                                intrinsic_ds = intrinsic
+                            O_xrightyup = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float64)
+                            Rwc_down = img_param.Rwc @ O_xrightyup
+                            w2c = build_w2c_extrinsic_from_whuomvs(img_param.Rwc, img_param.twc)
+                            pred_pts = unproject_depth_to_points(
+                                pred_depth_aligned, intrinsic_ds, w2c,
+                                stride=self.recon_stride,
+                            )
+                            if pred_pts.shape[0] > 0:
+                                overall_pred_points_list.append(pred_pts)
+                                cam_pred_points_map.setdefault(cam_id, []).append(pred_pts)
 
                     if self.save_adamvs_format and self.adamvs_output_path is not None:
                         self._save_adamvs_format(
@@ -1011,6 +1149,31 @@ class PredictMetricInfer:
                 "median_ang_error": float(np.median(overall_normal_metrics["median_ang_error"])),
                 "normal_valid_count": overall_normal_metrics["normal_valid_count"],
             }
+
+        if self.eval_recon and self._gt_pointcloud is not None and overall_pred_points_list:
+            logger.info("[INFO] Computing point cloud reconstruction metrics ...")
+            pred_all = np.concatenate(overall_pred_points_list, axis=0)
+            logger.info("[INFO] Total predicted points: %d, GT points: %d", pred_all.shape[0], self._gt_pointcloud.shape[0])
+            recon_result = compute_recon_metrics_multi_threshold(
+                pred_all, self._gt_pointcloud,
+                thresholds=(0.2, 0.5, 1.0, 2.0),
+            )
+            overall_result["recon"] = recon_result
+            for tau_key, tau_vals in recon_result.items():
+                logger.info(
+                    "[INFO] Recon %s: Precision=%.4f Recall=%.4f F1=%.4f Accuracy=%.4f",
+                    tau_key, tau_vals["precision"], tau_vals["recall"], tau_vals["f1"], tau_vals["accuracy"],
+                )
+
+            for cam_id, cam_pts_list in cam_pred_points_map.items():
+                cam_pred_all = np.concatenate(cam_pts_list, axis=0)
+                cam_recon = compute_recon_metrics_multi_threshold(
+                    cam_pred_all, self._gt_pointcloud,
+                    thresholds=(0.2, 0.5, 1.0, 2.0),
+                )
+                cam_key = "cam{}".format(cam_id)
+                if cam_key in per_camera_results:
+                    per_camera_results[cam_key]["recon"] = cam_recon
 
         return {
             "model_name": self.model_name,
@@ -1192,6 +1355,34 @@ def _print_results(results):
         ))
         print("-" * 120)
 
+    if "recon" in overall:
+        recon = overall["recon"]
+        print()
+        print("=== Point Cloud Reconstruction Metrics (Precision / Recall / F1) ===")
+        print("  Predicted 3D points (from depth unprojection) vs GT point cloud (gt.ply).")
+        print("  Precision: fraction of predicted points within tau of any GT point.")
+        print("  Recall (Completeness): fraction of GT points within tau of any predicted point.")
+        print("  F1: harmonic mean of Precision and Recall.")
+        print("  Accuracy: mean distance from predicted points to nearest GT point.")
+        print()
+        recon_headers = ["precision", "recall", "f1", "accuracy", "completeness"]
+        print("  {:>10} | {}".format(
+            "threshold",
+            " | ".join("{:>12}".format(h) for h in recon_headers),
+        ))
+        print("  " + "-" * 80)
+        for tau_key in sorted(recon.keys()):
+            tau_vals = recon[tau_key]
+            print("  {:>10} | {}".format(
+                tau_key,
+                " | ".join("{:>12}".format(_format_metric(tau_vals[h])) for h in recon_headers),
+            ))
+        print("  pred_count={} gt_count={}".format(
+            list(recon.values())[0].get("pred_count", "N/A"),
+            list(recon.values())[0].get("gt_count", "N/A"),
+        ))
+        print("-" * 120)
+
     for cam_key, cam_result in results["per_camera"].items():
         cam_depth = cam_result["depth"]
         print()
@@ -1208,6 +1399,14 @@ def _print_results(results):
             cn = cam_result["normal"]
             print("    Normal:    mean_ang={:.4f} deg, median_ang={:.4f} deg".format(
                 cn["mean_ang_error"], cn["median_ang_error"]
+            ))
+        if "recon" in cam_result:
+            cam_recon = cam_result["recon"]
+            print("    Recon (tau=0.50m): P={:.4f} R={:.4f} F1={:.4f} Acc={:.4f}m".format(
+                cam_recon.get("tau_0.50", {}).get("precision", 0),
+                cam_recon.get("tau_0.50", {}).get("recall", 0),
+                cam_recon.get("tau_0.50", {}).get("f1", 0),
+                cam_recon.get("tau_0.50", {}).get("accuracy", 0),
             ))
 
 
@@ -1251,6 +1450,30 @@ def parse_args():
         "--eval_normal",
         action="store_true",
         help="Also evaluate normal metrics (depth-derived vs GT normals).",
+    )
+    parser.add_argument(
+        "--eval_recon",
+        action="store_true",
+        help="Evaluate point cloud reconstruction metrics (Precision/Recall/F1) against GT point cloud.",
+    )
+    parser.add_argument(
+        "--recon_threshold",
+        type=float,
+        default=0.5,
+        help="Distance threshold (meters) for point cloud reconstruction metrics. Default: 0.5m.",
+    )
+    parser.add_argument(
+        "--recon_stride",
+        type=int,
+        default=4,
+        help="Stride for subsampling depth maps when unprojecting to 3D points. Default: 4.",
+    )
+    parser.add_argument(
+        "--lora_checkpoint",
+        type=str,
+        default=None,
+        help="Path to LoRA fine-tuned checkpoint (.pt) for DA3 model. "
+             "Example: exp/da3_large_lora_whuomvs/checkpoints/epoch_022.pt",
     )
     parser.add_argument(
         "--eval_dsm",
@@ -1354,6 +1577,10 @@ def main():
         multiview_num_neighbors=args.multiview_num_neighbors,
         multiview_process_res=args.multiview_process_res,
         multiview_ref_strategy=args.multiview_ref_strategy,
+        eval_recon=args.eval_recon,
+        recon_threshold=args.recon_threshold,
+        recon_stride=args.recon_stride,
+        lora_checkpoint=args.lora_checkpoint,
     )
     results = runner.run()
     _print_results(results)

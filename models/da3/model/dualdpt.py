@@ -29,25 +29,6 @@ from da3.model.utils.head_utils import (
 )
 
 
-class MetricDepthHead(nn.Module):
-    def __init__(self, feat_dim: int = 128, hidden_dim: int = 64):
-        super().__init__()
-        self.conv1 = nn.Conv2d(feat_dim + 1, hidden_dim, 3, 1, 1)
-        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
-        self.conv3 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
-        self.conv_out = nn.Conv2d(hidden_dim, 1, 1, 1, 0)
-        self.gelu = nn.GELU()
-        nn.init.zeros_(self.conv_out.weight)
-        nn.init.zeros_(self.conv_out.bias)
-
-    def forward(self, fused_feat: torch.Tensor, relative_depth: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([fused_feat, relative_depth.unsqueeze(1)], dim=1)
-        x = self.gelu(self.conv1(x))
-        x = self.gelu(self.conv2(x))
-        x = self.gelu(self.conv3(x))
-        return self.conv_out(x).squeeze(1)
-
-
 class DualDPT(nn.Module):
     """
     Dual-head DPT for dense prediction with an always-on auxiliary head.
@@ -270,18 +251,19 @@ class DualDPT(nn.Module):
             fused_main = self._add_pos_embed(fused_main, W, H)
 
         # Primary head: conv1 -> conv2 -> activate
-        # fused_main = self.scratch.output_conv1(fused_main)
         main_logits = self.scratch.output_conv2(fused_main)
         fmap = main_logits.permute(0, 2, 3, 1)
         main_pred = self._apply_activation_single(fmap[..., :-1], self.activation)
         main_conf = self._apply_activation_single(fmap[..., -1], self.conf_activation)
 
         # Metric depth: residual correction + per-image scale/shift offsets
+        metric_residual = None
+        metric_log_scale = None
+        metric_shift = None
         if hasattr(self, "metric_adapter") and self.metric_adapter is not None:
             metric_residual, metric_log_scale, metric_shift = self.metric_adapter(
                 fused_main, main_pred.squeeze(-1)
             )
-            main_pred = main_pred + metric_residual.unsqueeze(-1)
 
         # Auxiliary head (multi-level inside) -> only last level returned (after activation)
         last_aux = fused_aux_pyr[-1]
@@ -299,8 +281,11 @@ class DualDPT(nn.Module):
             self.head_aux: aux_pred,
             f"{self.head_aux}_conf": aux_conf,
         }
-        if hasattr(self, "metric_adapter") and self.metric_adapter is not None:
+        if metric_residual is not None:
+            out["metric_residual"] = metric_residual
+        if metric_log_scale is not None:
             out["metric_log_scale"] = metric_log_scale
+        if metric_shift is not None:
             out["metric_shift"] = metric_shift
         return out
 

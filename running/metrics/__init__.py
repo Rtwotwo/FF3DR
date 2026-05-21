@@ -12,6 +12,14 @@ from .dsm_metrics import (
     compute_elevation_error_per_pixel,
     build_image_name_to_params,
 )
+from .pointcloud_recon import (
+    PointCloudReconAccumulator,
+    PointCloudReconTotals,
+    load_ply,
+    compute_recon_metrics,
+    compute_recon_metrics_multi_threshold,
+    unproject_depth_to_points,
+)
 from .abs_rel import accumulate_abs_rel
 from .delta1 import accumulate_delta1
 from .delta2 import accumulate_delta2
@@ -26,6 +34,8 @@ __all__ = [
     "DepthMetricAccumulator",
     "AdaMVSMetricAccumulator",
     "DSMMetricAccumulator",
+    "PointCloudReconAccumulator",
+    "PointCloudReconTotals",
     "CameraParams",
     "ImageParams",
     "DSMGrid",
@@ -35,6 +45,10 @@ __all__ = [
     "unproject_depth_to_world",
     "compute_elevation_error_per_pixel",
     "build_image_name_to_params",
+    "load_ply",
+    "compute_recon_metrics",
+    "compute_recon_metrics_multi_threshold",
+    "unproject_depth_to_points",
     "compute_metrics",
     "accumulate_abs_rel",
     "accumulate_sq_rel",

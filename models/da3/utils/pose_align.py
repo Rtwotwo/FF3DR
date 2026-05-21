@@ -15,12 +15,9 @@
 from typing import List
 import numpy as np
 import torch
-try:
-    from evo.core.trajectory import PosePath3D
-except ImportError:
-    PosePath3D = None
+from evo.core.trajectory import PosePath3D
 
-from da3.utils.geometry import affine_inverse, affine_inverse_np
+from depth_anything_3.utils.geometry import affine_inverse, affine_inverse_np
 
 
 def batch_apply_alignment_to_enc(

@@ -435,7 +435,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log_level", type=str, default="INFO")
     parser.add_argument("--save_every_n_epochs", type=int, default=5)
-    parser.add_argument("--val_interval_steps", type=int, default=500)
+    # If 0, only run validation/test at epoch end.
+    parser.add_argument("--val_interval_steps", type=int, default=0)
     parser.add_argument("--print_every_steps", type=int, default=500)
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
@@ -593,7 +594,10 @@ def main():
                 args.absrel_weight, args.gradient_weight, args.range_weight)
     logger.info("  Reg: scale=%.4f shift=%.4f depth_norm=%.1f",
                 args.scale_reg_weight, args.shift_reg_weight, args.depth_norm)
-    logger.info("  Validation every %d steps", args.val_interval_steps)
+    if args.val_interval_steps and args.val_interval_steps > 0:
+        logger.info("  Validation every %d steps", args.val_interval_steps)
+    else:
+        logger.info("  Validation only at epoch end (val_interval_steps=0)")
     logger.info("=" * 70)
 
     for epoch in range(start_epoch, args.epochs):

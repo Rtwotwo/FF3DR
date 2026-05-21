@@ -31,7 +31,7 @@ PRETRAINED_PATH=""
 GPUS="7"
 BATCH_SIZE=2
 PROCESS_RES=504
-EPOCHS=20
+EPOCHS=30
 LR=5e-5
 WEIGHT_DECAY=1e-4
 WARMUP_STEPS=500
@@ -57,7 +57,7 @@ MAX_TRAIN_SAMPLES=-1
 MAX_VAL_SAMPLES=500
 MAX_TEST_SAMPLES=500
 SAVE_EVERY_N_EPOCHS=5
-VAL_INTERVAL_STEPS=500
+VAL_INTERVAL_STEPS=0
 PRINT_EVERY_STEPS=500
 SEED=42
 LOG_LEVEL=INFO
@@ -126,7 +126,11 @@ echo "LoRA:           rank=${LORA_RANK}, alpha=${LORA_ALPHA}, targets=${LORA_TAR
 echo "Adapter:        hidden=${ADAPTER_HIDDEN_DIM}, depth_norm=${ADAPTER_DEPTH_NORM}"
 echo "Loss:           SI=${SI_WEIGHT} LogL1=${LOGL1_WEIGHT} L1=${L1_WEIGHT} Grad=${GRADIENT_WEIGHT} Range=${RANGE_WEIGHT}"
 echo "Loss+Reg:       AbsRel=${ABSREL_WEIGHT} ScaleReg=${SCALE_REG_WEIGHT} ShiftReg=${SHIFT_REG_WEIGHT}"
-echo "Val interval:   every ${VAL_INTERVAL_STEPS} steps"
+if [[ "${VAL_INTERVAL_STEPS}" -gt 0 ]]; then
+    echo "Val interval:   every ${VAL_INTERVAL_STEPS} steps"
+else
+    echo "Val interval:   epoch-end only (val_interval_steps=0)"
+fi
 echo "Print interval: every ${PRINT_EVERY_STEPS} steps"
 echo "Resume:         ${RESUME:-none}"
 echo "============================================"

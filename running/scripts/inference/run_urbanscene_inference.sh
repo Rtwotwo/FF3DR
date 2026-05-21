@@ -5,12 +5,12 @@
 
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/UrbanScene"
 MODEL_NAME="depthanything3"
-GPU_ID=6
-CHUNK_SIZE=120
-OVERLAP=60
+GPU_ID=5
+CHUNK_SIZE=60
+OVERLAP=24
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-INFERENCE_SCRIPT="${SCRIPT_DIR}/../inference/run_urbanscene_inference.py"
+INFERENCE_SCRIPT="${SCRIPT_DIR}/../../inference/run_urbanscene_inference.py"
 RUN_ARGS_YAML="${SCRIPT_DIR}/../../configs/run_urbanscene_inference.yaml"
 
 if [ ! -d "$DATASET_PATH" ]; then

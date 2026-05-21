@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from safetensors.torch import load_file
+import cv2
 
 
 def _find_repo_root(start: Path) -> Path:
@@ -60,6 +61,45 @@ from models.vggt.models.vggt import VGGT
 logger = logging.getLogger(__name__)
 
 
+def _depth_to_color(depth_map, vmin=None, vmax=None, cmap=cv2.COLORMAP_TURBO):
+    h, w = depth_map.shape[:2]
+    valid = np.isfinite(depth_map)
+    if not np.any(valid):
+        return np.zeros((h, w, 3), dtype=np.uint8)
+    if vmin is None:
+        vmin = float(np.min(depth_map[valid]))
+    if vmax is None:
+        vmax = float(np.max(depth_map[valid]))
+    if vmax - vmin < 1e-8:
+        vmax = vmin + 1.0
+    norm = np.clip((depth_map - vmin) / (vmax - vmin), 0.0, 1.0)
+    norm_uint8 = (norm * 255).astype(np.uint8)
+    color = cv2.applyColorMap(norm_uint8, cmap)
+    color[~valid] = 0
+    return color
+
+
+def _conf_to_color(conf_map, vmin=0.0, vmax=1.0):
+    h, w = conf_map.shape[:2]
+    valid = np.isfinite(conf_map)
+    if not np.any(valid):
+        return np.zeros((h, w, 3), dtype=np.uint8)
+    norm = np.clip((conf_map - vmin) / (vmax - vmin + 1e-10), 0.0, 1.0)
+    norm_uint8 = (norm * 255).astype(np.uint8)
+    color = cv2.applyColorMap(norm_uint8, cv2.COLORMAP_JET)
+    color[~valid] = 0
+    return color
+
+
+def _overlay_depth_on_rgb(rgb, depth_color, alpha=0.5):
+    if rgb.ndim == 2:
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
+    if rgb.shape[:2] != depth_color.shape[:2]:
+        depth_color = cv2.resize(depth_color, (rgb.shape[1], rgb.shape[0]))
+    blended = cv2.addWeighted(rgb, 1.0 - alpha, depth_color, alpha, 0)
+    return blended
+
+
 class FF3DR:
     """Streaming reconstruction for synchronized multi-camera rigs.
     Design goals:
@@ -95,8 +135,13 @@ class FF3DR:
         self.predictions_loop_dir = os.path.join(self.output_path, "tmp_predictions_loop")
         self.predictions_aligned_dir = os.path.join(self.output_path, "tmp_predictions_aligned")
         self.predictions_unaligned_dir = os.path.join(self.output_path, "tmp_predictions_unaligned")
+        self.enable_viz = bool(getattr(args, "enable_viz", False))
+        self.viz_dir = os.path.join(self.output_path, "viz")
         for p in [self.output_path, self.predictions_pcd_dir, self.predictions_loop_dir, self.predictions_aligned_dir, self.predictions_unaligned_dir]:
             os.makedirs(p, exist_ok=True)
+        if self.enable_viz:
+            os.makedirs(self.viz_dir, exist_ok=True)
+            logger.info("[INFO] Visualization enabled, saving to %s", self.viz_dir)
         self.loop_enable = bool(self.config.get("Model", {}).get("loop_enable", False))
         self.loop_chunk_half_window = int(self.config.get("Model", {}).get("loop_chunk_size", 20))
         self.camera_dirs, self.image_paths = self._build_camera_index(self.area_path)
@@ -938,6 +983,62 @@ class FF3DR:
                 images = images.clip(0, 255).astype(np.uint8)
         return world_points, conf, images, depth
 
+    def _save_viz_for_chunk(self, chunk_data, chunk_idx, frame_offset):
+        if not self.enable_viz:
+            return
+        depth, conf, intrinsics, extrinsics, images, _ = self._get_prediction_arrays(chunk_data)
+        if depth is None or conf is None:
+            return
+        n_views = depth.shape[0]
+        cam_names = [os.path.basename(p) for p in self.camera_dirs]
+
+        if depth.ndim == 4 and depth.shape[-1] == 1:
+            depth = depth.squeeze(-1)
+        if conf.ndim == 4 and conf.shape[-1] == 1:
+            conf = conf.squeeze(-1)
+
+        depth_global_min = float(np.min(depth[np.isfinite(depth)])) if np.any(np.isfinite(depth)) else 0.0
+        depth_global_max = float(np.max(depth[np.isfinite(depth)])) if np.any(np.isfinite(depth)) else 1.0
+
+        for vi in range(n_views):
+            if self.num_cameras > 1:
+                frame_local = vi // self.num_cameras
+                cam_local = vi % self.num_cameras
+                cam_name = cam_names[cam_local] if cam_local < len(cam_names) else str(cam_local)
+            else:
+                frame_local = vi
+                cam_name = cam_names[0] if len(cam_names) > 0 else "0"
+
+            global_frame_idx = frame_offset + frame_local
+            stem = "{:06d}".format(global_frame_idx)
+
+            cam_viz_dir = os.path.join(self.viz_dir, cam_name)
+            os.makedirs(cam_viz_dir, exist_ok=True)
+
+            d = depth[vi]
+            c = conf[vi]
+
+            depth_color = _depth_to_color(d, vmin=depth_global_min, vmax=depth_global_max)
+            cv2.imwrite(os.path.join(cam_viz_dir, "{}_depth.png".format(stem)), depth_color)
+
+            conf_color = _conf_to_color(c)
+            cv2.imwrite(os.path.join(cam_viz_dir, "{}_conf.png".format(stem)), conf_color)
+
+            if images is not None:
+                img = images[vi]
+                if img.ndim == 3 and img.shape[-1] == 3:
+                    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                elif img.ndim == 2:
+                    img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                else:
+                    img_bgr = None
+                if img_bgr is not None:
+                    cv2.imwrite(os.path.join(cam_viz_dir, "{}_rgb.png".format(stem)), img_bgr)
+                    overlay = _overlay_depth_on_rgb(img_bgr, depth_color, alpha=0.5)
+                    cv2.imwrite(os.path.join(cam_viz_dir, "{}_overlay.png".format(stem)), overlay)
+
+        logger.info("[INFO] Saved viz for chunk %d (%d views) to %s", chunk_idx, n_views, self.viz_dir)
+
     def _run_loop_detection(self, chunk_indices):
         """Run SALAD-based loop detection on the image sequence.
 
@@ -1071,6 +1172,9 @@ class FF3DR:
         for chunk_idx, fr in enumerate(chunk_indices):
             logger.info("[Progress] chunk %d/%d, frame_range=%s", chunk_idx + 1, len(chunk_indices), fr)
             cur_predictions = self.inference_single_chunk(fr, chunk_idx=chunk_idx, is_loop=False)
+            if self.enable_viz:
+                frame_offset = fr[0]
+                self._save_viz_for_chunk(cur_predictions, chunk_idx, frame_offset)
             if pre_predictions is not None:
                 points1, conf1, _, depth1 = self._chunk_to_point_arrays(pre_predictions)
                 points2, conf2, _, depth2 = self._chunk_to_point_arrays(cur_predictions)
@@ -1341,6 +1445,12 @@ def _build_parser(run_defaults):
         type=str,
         default=run_defaults.get("device", "cpu"),
         help="Fallback device string when cuda is unavailable",
+    )
+    parser.add_argument(
+        "--enable_viz",
+        action="store_true",
+        default=bool(run_defaults.get("enable_viz", False)),
+        help="Save per-frame visualization (depth/conf/rgb/overlay) under <output>/viz/",
     )
     return parser
 

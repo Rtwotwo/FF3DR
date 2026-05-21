@@ -10,9 +10,15 @@
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/WHU-OMVS"
 TRAIN_TEST_SPLIT="predict"
 MODEL_NAMES=("depthanything3" "mapanything" "pi3" "vggt")
-CHUNK_SIZE=30
-OVERLAP=12
-GPU_ID=0
+CHUNK_SIZE=60
+OVERLAP=24
+ENABLE_VIZ=true
+GPU_ID=3
+
+VIZ_FLAG=""
+if [[ "${ENABLE_VIZ}" == "true" ]]; then
+    VIZ_FLAG="--enable_viz"
+fi
  
 for MODEL_NAME in "${MODEL_NAMES[@]}"; do
     echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${MODEL_NAME}..."
@@ -24,13 +30,14 @@ for MODEL_NAME in "${MODEL_NAMES[@]}"; do
         for AREA_ID in "${AREA_IDS[@]}"; do
             for CAME_ID in "${CAME_IDS[@]}"; do
                 echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${AREA_ID} came${CAME_ID}..."
-                CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_whuomvs_inference.py" \
+                CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../../inference/run_whuomvs_inference.py" \
                     --area_path "$DATASET_PATH/$TRAIN_TEST_SPLIT/$AREA_ID/images" \
                     --output_path "./exp/whu-omvs/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${AREA_ID}_came${CAME_ID}" \
                     --camera_ids "$CAME_ID" \
                     --model_name "$MODEL_NAME" \
                     --chunk_size ${CHUNK_SIZE} \
-                    --overlap ${OVERLAP}
+                    --overlap ${OVERLAP} \
+                    ${VIZ_FLAG}
             done
         done
     elif [[ "$TRAIN_TEST_SPLIT" == "test" ]]; then
@@ -39,27 +46,30 @@ for MODEL_NAME in "${MODEL_NAMES[@]}"; do
         for AREA_ID in "${AREA_IDS[@]}"; do
             for CAME_ID in "${CAME_IDS[@]}"; do
                 echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${AREA_ID} came${CAME_ID}..."
-                CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_whuomvs_inference.py" \
+                CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../../inference/run_whuomvs_inference.py" \
                     --area_path "$DATASET_PATH/$TRAIN_TEST_SPLIT/$AREA_ID/images" \
                     --output_path "./exp/whu-omvs/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_${AREA_ID}_came${CAME_ID}" \
                     --camera_ids "$CAME_ID" \
                     --model_name "$MODEL_NAME" \
                     --chunk_size ${CHUNK_SIZE} \
-                    --overlap ${OVERLAP}
+                    --overlap ${OVERLAP} \
+                    ${VIZ_FLAG}
             done
         done
     elif [[ "$TRAIN_TEST_SPLIT" == "predict" ]]; then
         # for predict folder, no area id, only for camera id
-        CAME_IDS=(1 2 3 4 5)
+        # CAME_IDS=(1 2 3 4 5)
+        CAME_IDS=(5)
         for CAME_ID in "${CAME_IDS[@]}"; do
             echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for came${CAME_ID}..."
-            CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../inference/run_whuomvs_inference.py" \
+            CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$(dirname "$0")/../../inference/run_whuomvs_inference.py" \
                 --area_path "$DATASET_PATH/$TRAIN_TEST_SPLIT/Images" \
                 --output_path "./exp/whu-omvs/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_came${CAME_ID}" \
                 --camera_ids "$CAME_ID" \
                 --model_name "$MODEL_NAME" \
                 --chunk_size ${CHUNK_SIZE} \
-                --overlap ${OVERLAP}
+                --overlap ${OVERLAP} \
+                ${VIZ_FLAG}
         done
     fi
 done

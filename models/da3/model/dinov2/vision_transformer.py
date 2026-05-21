@@ -322,7 +322,9 @@ class DinoVisionTransformer(nn.Module):
 
             if self.alt_start != -1 and i == self.alt_start:
                 if kwargs.get("cam_token", None) is not None:
-                    logger.info("Using camera conditions provided by the user")
+                    if not getattr(self, "_logged_user_cam_conditions", False):
+                        logger.info("Using camera conditions provided by the user")
+                        setattr(self, "_logged_user_cam_conditions", True)
                     cam_token = kwargs.get("cam_token")
                 else:
                     ref_token = self.camera_token[:, :1].expand(B, -1, -1)

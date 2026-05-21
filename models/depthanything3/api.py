@@ -28,6 +28,16 @@ import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin
 from PIL import Image
 
+
+def _is_cuda_before_12():
+    try:
+        cuda_ver = torch.version.cuda
+        if cuda_ver is not None:
+            return int(cuda_ver.split(".")[0]) < 12
+    except Exception:
+        pass
+    return False
+
 from models.depthanything3.cfg import create_object, load_config
 from models.depthanything3.registry import MODEL_REGISTRY
 from models.depthanything3.specs import Prediction
@@ -123,7 +133,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
             Dictionary containing model predictions
         """
         # Determine optimal autocast dtype
-        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        autocast_dtype = torch.bfloat16 if (torch.cuda.is_bf16_supported() and not _is_cuda_before_12()) else torch.float16
         with torch.no_grad():
             with torch.autocast(device_type=image.device.type, dtype=autocast_dtype):
                 return self.model(
