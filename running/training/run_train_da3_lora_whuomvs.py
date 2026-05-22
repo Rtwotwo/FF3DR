@@ -26,7 +26,6 @@ for p in (_REPO_ROOT, _REPO_ROOT / "models", _SCRIPT_DIR.parent):
         sys.path.insert(0, str(p))
 
 from running.data.whuomvs_depth_dataset import WHUOMVSDepthDataset
-from running.training.da3_metric_loss import MetricDepthLossV3
 
 logger = logging.getLogger(__name__)
 
@@ -176,22 +175,9 @@ class DA3ForMetricDepth(nn.Module):
             pred_depth = output.depth[:, 0]
             if pred_depth.ndim == 3 and pred_depth.shape[1] == 1:
                 pred_depth = pred_depth.squeeze(1)
-            delta_log_scale = getattr(output, "metric_log_scale", None)
-            delta_shift = getattr(output, "metric_shift", None)
         pred_depth = pred_depth.float()
-        if delta_log_scale is not None and delta_log_scale.ndim > 1:
-            delta_log_scale = delta_log_scale.squeeze(-1)
-        if delta_shift is not None and delta_shift.ndim > 1:
-            delta_shift = delta_shift.squeeze(-1)
-        if delta_log_scale is None:
-            delta_log_scale = torch.zeros(pred_depth.shape[0], device=pred_depth.device)
-        if delta_shift is None:
-            delta_shift = torch.zeros(pred_depth.shape[0], device=pred_depth.device)
-
-        log_scale = self.scale_shift.log_scale + delta_log_scale
-        shift = self.scale_shift.shift + delta_shift
-        pred_metric = pred_depth * torch.exp(log_scale).view(-1, 1, 1) + shift.view(-1, 1, 1)
-        return pred_depth, pred_metric, log_scale, shift
+        pred_metric = self.scale_shift(pred_depth)
+        return pred_depth, pred_metric
 
 
 def get_raw_model(model):
@@ -294,7 +280,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
         valid_mask = batch["valid_mask"].to(device)
         images_input = images.unsqueeze(1)
 
-        _, pred_metric, log_scale, shift = raw(images_input)
+        _, pred_metric = raw(images_input)
 
         if pred_metric.shape[-2:] != depth_gt.shape[-2:]:
             pred_metric = F.interpolate(
@@ -302,7 +288,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
                 mode="bilinear", align_corners=True,
             ).squeeze(1)
 
-        loss_dict = criterion(pred_metric, depth_gt, valid_mask, log_scale=log_scale, shift=shift)
+        loss_dict = criterion(pred_metric, depth_gt, valid_mask)
         total_loss += loss_dict["loss"].item()
 
         if not logged_depth_images and writer is not None:
@@ -375,19 +361,18 @@ def set_phase_grads(model, phase):
             param.requires_grad = False
         for param in raw.scale_shift.parameters():
             param.requires_grad = True
-        if hasattr(raw.da3.model.head, "metric_adapter"):
-            for param in raw.da3.model.head.metric_adapter.parameters():
-                param.requires_grad = True
+        for param in raw.da3.model.head.metric_depth_head.parameters():
+            param.requires_grad = True
     elif phase == 2:
         for name, param in raw.da3.named_parameters():
-            param.requires_grad = "lora" in name.lower() or "metric_adapter" in name.lower()
+            param.requires_grad = "lora" in name.lower() or "metric_depth_head" in name.lower()
         for param in raw.scale_shift.parameters():
             param.requires_grad = True
     elif phase == 3:
         for name, param in raw.da3.named_parameters():
             param.requires_grad = (
                 "lora" in name.lower()
-                or "metric_adapter" in name.lower()
+                or "metric_depth_head" in name.lower()
                 or "output_conv" in name.lower()
             )
         for param in raw.scale_shift.parameters():
@@ -396,7 +381,7 @@ def set_phase_grads(model, phase):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fine-tune DA3-Large with LoRA + MetricAdapterV3 for metric depth on WHU-OMVS"
+        description="Fine-tune DA3-Large with LoRA + MetricDepthHead for metric depth on WHU-OMVS"
     )
     parser.add_argument("--dataset_root", type=str, default="dataset/WHU-OMVS")
     parser.add_argument("--output_dir", type=str, default="exp/da3_large_lora_whuomvs")
@@ -415,19 +400,13 @@ def main():
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--lora_target_modules", nargs="+", default=["qkv", "proj"])
-    parser.add_argument("--adapter_hidden_dim", type=int, default=64)
-    parser.add_argument("--adapter_depth_norm", type=float, default=600.0)
     parser.add_argument("--phase1_epochs", type=int, default=2)
     parser.add_argument("--phase2_epochs", type=int, default=10)
     parser.add_argument("--si_weight", type=float, default=1.0)
     parser.add_argument("--logl1_weight", type=float, default=10.0)
     parser.add_argument("--l1_weight", type=float, default=1.0)
-    parser.add_argument("--absrel_weight", type=float, default=0.5)
     parser.add_argument("--gradient_weight", type=float, default=0.5)
     parser.add_argument("--range_weight", type=float, default=0.1)
-    parser.add_argument("--scale_reg_weight", type=float, default=0.01)
-    parser.add_argument("--shift_reg_weight", type=float, default=0.01)
-    parser.add_argument("--depth_norm", type=float, default=600.0)
     parser.add_argument("--max_train_samples", type=int, default=-1)
     parser.add_argument("--max_val_samples", type=int, default=-1)
     parser.add_argument("--max_test_samples", type=int, default=-1)
@@ -435,14 +414,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log_level", type=str, default="INFO")
     parser.add_argument("--save_every_n_epochs", type=int, default=5)
-    # If 0, only run validation/test at epoch end.
-    parser.add_argument("--val_interval_steps", type=int, default=0)
-    parser.add_argument("--print_every_steps", type=int, default=500)
+    parser.add_argument("--val_interval_steps", type=int, default=500)
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
-
-    if args.adapter_depth_norm is not None:
-        args.depth_norm = args.adapter_depth_norm
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
@@ -466,15 +440,6 @@ def main():
     logger.info("Building DA3 model: %s", args.model_name)
     da3_model = build_da3_model(args.model_name, args.pretrained_path)
     da3_model = da3_model.to(device)
-    if hasattr(da3_model.model, "head") and hasattr(da3_model.model.head, "metric_adapter"):
-        from da3.model.metric_adapter import MetricAdapterV3
-
-        feat_dim = da3_model.model.head.metric_adapter.residual_conv1.in_channels - 1
-        da3_model.model.head.metric_adapter = MetricAdapterV3(
-            feat_dim=feat_dim,
-            hidden_dim=args.adapter_hidden_dim,
-            depth_norm=args.depth_norm,
-        ).to(device)
 
     dataset_root = str(
         Path(args.dataset_root).resolve() if not os.path.isabs(args.dataset_root) else args.dataset_root
@@ -513,23 +478,18 @@ def main():
     da3_model.model = da3_inner
 
     raw_model = get_raw_model(model)
-    if hasattr(raw_model.da3.model.head, "metric_adapter"):
-        head_params = sum(p.numel() for p in raw_model.da3.model.head.metric_adapter.parameters())
-    else:
-        head_params = 0
+    head_params = sum(p.numel() for p in raw_model.da3.model.head.metric_depth_head.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
-    logger.info("Trainable: %d / %d (%.2f%%) | MetricAdapter: %d | ScaleShift: %d",
+    logger.info("Trainable: %d / %d (%.2f%%) | MetricDepthHead: %d | ScaleShift: %d",
                 trainable_params, total_params, 100.0 * trainable_params / total_params,
                 head_params, sum(p.numel() for p in raw_model.scale_shift.parameters()))
     logger.info("ScaleShift: scale=%.4f, shift=%.4f", raw_model.scale_shift.scale, raw_model.scale_shift.shift_val)
 
-    criterion = MetricDepthLossV3(
+    criterion = MetricDepthLossV2(
         si_weight=args.si_weight, logl1_weight=args.logl1_weight,
-        l1_weight=args.l1_weight, absrel_weight=args.absrel_weight,
-        gradient_weight=args.gradient_weight, range_weight=args.range_weight,
-        scale_reg_weight=args.scale_reg_weight, shift_reg_weight=args.shift_reg_weight,
-        depth_norm=args.depth_norm,
+        l1_weight=args.l1_weight, gradient_weight=args.gradient_weight,
+        range_weight=args.range_weight,
     )
 
     train_loader = DataLoader(
@@ -589,15 +549,10 @@ def main():
     logger.info("  LR: %.2e, Warmup: %d steps, Grad accum: %d",
                 args.lr, warmup_steps, args.grad_accum_steps)
     logger.info("  LoRA: rank=%d, alpha=%d", args.lora_rank, args.lora_alpha)
-    logger.info("  Loss: SI=%.1f LogL1=%.1f L1=%.1f AbsRel=%.1f Grad=%.1f Range=%.1f",
+    logger.info("  Loss: SI=%.1f LogL1=%.1f L1=%.1f Grad=%.1f Range=%.1f",
                 args.si_weight, args.logl1_weight, args.l1_weight,
-                args.absrel_weight, args.gradient_weight, args.range_weight)
-    logger.info("  Reg: scale=%.4f shift=%.4f depth_norm=%.1f",
-                args.scale_reg_weight, args.shift_reg_weight, args.depth_norm)
-    if args.val_interval_steps and args.val_interval_steps > 0:
-        logger.info("  Validation every %d steps", args.val_interval_steps)
-    else:
-        logger.info("  Validation only at epoch end (val_interval_steps=0)")
+                args.gradient_weight, args.range_weight)
+    logger.info("  Validation every %d steps", args.val_interval_steps)
     logger.info("=" * 70)
 
     for epoch in range(start_epoch, args.epochs):
@@ -631,7 +586,7 @@ def main():
             valid_mask = batch["valid_mask"].to(device)
             images_input = images.unsqueeze(1)
 
-            _, pred_metric, log_scale, shift = model(images_input)
+            _, pred_metric = model(images_input)
 
             if pred_metric.shape[-2:] != depth_gt.shape[-2:]:
                 pred_metric = F.interpolate(
@@ -639,7 +594,7 @@ def main():
                     mode="bilinear", align_corners=True,
                 ).squeeze(1)
 
-            loss_dict = criterion(pred_metric, depth_gt, valid_mask, log_scale=log_scale, shift=shift)
+            loss_dict = criterion(pred_metric, depth_gt, valid_mask)
             loss = loss_dict["loss"] / args.grad_accum_steps
             loss.backward()
 
@@ -657,11 +612,8 @@ def main():
                 writer.add_scalar("train/si_loss", loss_dict["si_loss"].item(), global_step)
                 writer.add_scalar("train/logl1_loss", loss_dict["logl1_loss"].item(), global_step)
                 writer.add_scalar("train/l1_loss", loss_dict["l1_loss"].item(), global_step)
-                writer.add_scalar("train/absrel_loss", loss_dict["absrel_loss"].item(), global_step)
                 writer.add_scalar("train/gradient_loss", loss_dict["gradient_loss"].item(), global_step)
                 writer.add_scalar("train/range_loss", loss_dict["range_loss"].item(), global_step)
-                writer.add_scalar("train/scale_reg", loss_dict["scale_reg"].item(), global_step)
-                writer.add_scalar("train/shift_reg", loss_dict["shift_reg"].item(), global_step)
                 writer.add_scalar("train/scale", raw_model.scale_shift.scale, global_step)
                 writer.add_scalar("train/shift", raw_model.scale_shift.shift_val, global_step)
                 writer.add_scalar("train/grad_norm", grad_norm.item(), global_step)
@@ -672,14 +624,13 @@ def main():
             epoch_l1 += loss_dict["l1_loss"].item()
             num_batches += 1
 
-            if global_step > 0 and (global_step % args.print_every_steps == 0):
+            if step % 500 == 0:
                 current_lr = scheduler.get_last_lr()[0]
                 logger.info(
-                    "  E%d/%d P%d GStep %d | lr=%.2e loss=%.2f si=%.4f logl1=%.4f l1=%.2f absrel=%.4f scale=%.2f shift=%.4f",
-                    epoch + 1, args.epochs, phase, global_step,
+                    "  E%d/%d P%d Step %d/%d | lr=%.2e loss=%.2f si=%.4f logl1=%.4f l1=%.2f scale=%.2f shift=%.4f",
+                    epoch + 1, args.epochs, phase, step, len(train_loader),
                     current_lr, loss_dict["loss"].item(), loss_dict["si_loss"].item(),
                     loss_dict["logl1_loss"].item(), loss_dict["l1_loss"].item(),
-                    loss_dict["absrel_loss"].item(),
                     raw_model.scale_shift.scale, raw_model.scale_shift.shift_val,
                 )
 
@@ -794,7 +745,7 @@ def main():
     lora_path = ckpt_dir / "lora_final.pt"
     lora_state = {
         k: v for k, v in model.state_dict().items()
-        if "lora" in k.lower() or "metric_adapter" in k.lower() or "scale_shift" in k.lower()
+        if "lora" in k.lower() or "metric_depth_head" in k.lower() or "scale_shift" in k.lower()
     }
     torch.save(lora_state, str(lora_path))
     logger.info("Saved LoRA + Head + ScaleShift weights: %s (%d keys)", lora_path, len(lora_state))

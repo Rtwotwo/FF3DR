@@ -208,17 +208,28 @@ class FF3DR:
                     self.anchor_cam_index,
                 )
 
-        self.enable_nvs_rendering = not getattr(args, 'disable_nvs', False)
+        # DA3 Gaussian Splatting (gsplat) rendering is opt-in (default OFF).
+        # Keep --disable_nvs as a legacy override, but do not auto-enable rendering.
+        self.enable_nvs_rendering = bool(getattr(args, "enable_da3_gsplat", False))
+        if getattr(args, "disable_nvs", False):
+            self.enable_nvs_rendering = False
+
         if self.enable_nvs_rendering:
-            logger.info("[INFO] NVS rendering enabled")
+            logger.info("[INFO] DA3 gsplat rendering enabled")
             try:
                 from depth_anything_3.utils.export.gs import export_to_gs_ply, export_to_gs_video
+
                 self._export_to_gs_ply = export_to_gs_ply
                 self._export_to_gs_video = export_to_gs_video
                 logger.info("[INFO] Gaussian Splatting export functions loaded successfully")
             except ImportError as e:
                 logger.warning("[WARN] Could not import GS export functions: %s", e)
                 self.enable_nvs_rendering = False
+
+        # Point cloud saving overrides (mainly for improving visual density)
+        self.pcd_sample_ratio = float(getattr(args, "pcd_sample_ratio", -1.0))
+        self.pcd_conf_threshold_coef = float(getattr(args, "pcd_conf_threshold_coef", -1.0))
+        self.pcd_conf_threshold_abs = float(getattr(args, "pcd_conf_threshold", -1.0))
 
     def _cfg_get_weight(self, model_key, field, fallback_flat_key=None):
         weights = self.config.get("Weights", {})
@@ -467,22 +478,19 @@ class FF3DR:
         return depth, conf, intrinsics, extrinsics, images, world_points
 
     def get_chunk_indices(self):
-        all_frames = []
-        for cam_idx in range(self.num_cameras):
-            for frame_idx in range(self.num_frames):
-                all_frames.append((cam_idx, frame_idx))
-        total_frames = len(all_frames)
-        chunk_size_cams = self.chunk_size * self.num_cameras
-        overlap_cams = self.overlap * self.num_cameras
+        total_frames = self.num_frames
+        if total_frames <= 0:
+            return []
+
+        step = max(1, self.chunk_size - self.overlap)
         chunk_ranges = []
         start = 0
         while start < total_frames:
-            end = min(start + chunk_size_cams, total_frames)
-            frame_indices = all_frames[start:start + chunk_size_cams]
+            end = min(start + self.chunk_size, total_frames)
             chunk_ranges.append((start, end))
             if end >= total_frames:
                 break
-            start += chunk_size_cams - overlap_cams
+            start += step
         return chunk_ranges
 
     def _resolve_anchor_cam_index(self, anchor_cam_index):
@@ -492,13 +500,27 @@ class FF3DR:
 
     def _build_chunk_images(self, range_1, range_2=None):
         chunk_images = []
-        for cam_idx in range(self.num_cameras):
-            cam_key = self.camera_dirs[cam_idx]
-            cam_frames = self.image_paths[cam_key]
-            for frame_start in range(range_1[0], range_1[1]):
+        for frame_start in range(range_1[0], range_1[1]):
+            for cam_idx in range(self.num_cameras):
+                cam_key = self.camera_dirs[cam_idx]
+                cam_frames = self.image_paths[cam_key]
                 if frame_start < len(cam_frames):
                     chunk_images.append(cam_frames[frame_start])
         return chunk_images
+
+    def _chunk_point_keep_bounds(self, chunk_idx, num_chunks, total_points):
+        if total_points <= 0:
+            return 0, 0
+        if num_chunks <= 1 or self.overlap <= 0 or self.num_cameras <= 0:
+            return 0, total_points
+
+        overlap_points = min(self.overlap, self.num_frames) * self.num_cameras
+        overlap_points = min(overlap_points, total_points)
+        if chunk_idx == 0:
+            return 0, max(0, total_points - overlap_points)
+        if chunk_idx == num_chunks - 1:
+            return overlap_points, total_points
+        return overlap_points, max(overlap_points, total_points - overlap_points)
 
     def _select_anchor_from_frame_major(self, frame_major_data, overlap_n, from_tail=False):
         if frame_major_data is None or self.num_cameras == 0:
@@ -516,171 +538,49 @@ class FF3DR:
         return anchor_data
 
     def _infer_depthanything3(self, chunk_images, ref_view_strategy):
-        depths_list = []
-        confs_list = []
-        intrs_list = []
-        extrs_list = []
-        imgs_list = []
-        world_points_list = []
-        prediction_list = []
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        num_images = len(chunk_images)
-        group_frames = self.da3_group_frames
-        overlap = min(self.da3_group_overlap, max(group_frames - 1, 0))
-        step = max(group_frames - overlap, 1)
-
-        group_ranges = []
-        s = 0
-        while s < num_images:
-            e = min(s + group_frames, num_images)
-            group_ranges.append((s, e))
-            if e == num_images:
-                break
-            s += step
-
-        cum_s = 1.0
-        cum_R = np.eye(3, dtype=np.float32)
-        cum_t = np.zeros(3, dtype=np.float32)
-        prev_group_points = None
-        prev_group_conf = None
-        align_err_hist = []
-
-        for gi, (fs, fe) in enumerate(group_ranges):
-            group_images = chunk_images[fs:fe]
-
+        with torch.no_grad():
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            with torch.no_grad():
-                if torch.cuda.is_available():
-                    with torch.amp.autocast("cuda", dtype=self.dtype):
-                        pred = self.model.inference(
-                            group_images,
-                            ref_view_strategy=ref_view_strategy,
-                            infer_gs=self.enable_nvs_rendering,
-                        )
-                else:
+                with torch.amp.autocast("cuda", dtype=self.dtype):
                     pred = self.model.inference(
-                        group_images,
+                        chunk_images,
                         ref_view_strategy=ref_view_strategy,
                         infer_gs=self.enable_nvs_rendering,
                     )
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            g_depth = self._to_numpy(pred.depth)
-            g_conf = self._to_numpy(pred.conf)
-            g_intr = self._to_numpy(pred.intrinsics)
-            g_extr = self._to_numpy(pred.extrinsics)
-            g_img = self._to_numpy(pred.processed_images)
-
-            if g_conf is not None:
-                g_conf = g_conf - 1.0
-
-            g_points = None
-            if g_depth is not None and g_intr is not None and g_extr is not None:
-                g_points = depth_to_point_cloud_optimized_torch(g_depth, g_intr, g_extr)
-
-            g_num_frames = fe - fs
-            if (
-                gi > 0
-                and overlap > 0
-                and prev_group_points is not None
-                and g_points is not None
-                and g_conf is not None
-            ):
-                use_overlap = min(overlap, g_num_frames)
-                prev_overlap_points = prev_group_points[-use_overlap:]
-                prev_overlap_conf = prev_group_conf[-use_overlap:]
-                cur_overlap_points = g_points[:use_overlap]
-                cur_overlap_conf = g_conf[:use_overlap]
-
-                conf_threshold = min(np.median(prev_overlap_conf), np.median(cur_overlap_conf)) * 0.1
-                gs, gR, gt = weighted_align_point_maps(
-                    prev_overlap_points,
-                    prev_overlap_conf,
-                    cur_overlap_points,
-                    cur_overlap_conf,
-                    conf_threshold=conf_threshold,
-                    config=self.config,
-                    precompute_scale=None,
-                )
-                gerr = float(
-                    compute_alignment_error(
-                        prev_overlap_points,
-                        prev_overlap_conf,
-                        cur_overlap_points,
-                        cur_overlap_conf,
-                        conf_threshold,
-                        gs,
-                        gR,
-                        gt,
-                    )
-                )
-
-                if len(align_err_hist) < 2:
-                    is_bad = gerr > 0.6
-                else:
-                    err_thr = max(0.5, 2.8 * float(np.median(align_err_hist)))
-                    is_bad = gerr > err_thr
-
-                if not is_bad:
-                    cum_s = float(gs * cum_s)
-                    cum_R = gR @ cum_R
-                    cum_t = gs * (gR @ cum_t) + gt
-                else:
-                    logger.warning(
-                        "[WARN] Group stitch outlier at group %d: err=%.4f, keep previous cumulative transform",
-                        gi,
-                        gerr,
-                    )
-                align_err_hist.append(gerr)
-
-            if g_points is not None:
-                g_points = apply_sim3_direct_torch(g_points, cum_s, cum_R, cum_t)
-
-            if gi == 0:
-                keep_start = 0
             else:
-                keep_start = overlap
+                pred = self.model.inference(
+                    chunk_images,
+                    ref_view_strategy=ref_view_strategy,
+                    infer_gs=self.enable_nvs_rendering,
+                )
 
-            if g_depth is not None:
-                depths_list.append(g_depth[keep_start:])
-            if g_conf is not None:
-                confs_list.append(g_conf[keep_start:])
-            if g_intr is not None:
-                intrs_list.append(g_intr[keep_start:])
-            if g_extr is not None:
-                extrs_list.append(g_extr[keep_start:])
-            if g_img is not None:
-                imgs_list.append(g_img[keep_start:])
-            if g_points is not None:
-                world_points_list.append(g_points[keep_start:])
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-            if self.enable_nvs_rendering:
-                prediction_list.append(pred)
+        depth = self._to_numpy(getattr(pred, "depth", None))
+        conf = self._to_numpy(getattr(pred, "conf", None))
+        intrinsics = self._to_numpy(getattr(pred, "intrinsics", None))
+        extrinsics = self._to_numpy(getattr(pred, "extrinsics", None))
+        processed_images = self._to_numpy(getattr(pred, "processed_images", None))
+        world_points = self._to_numpy(getattr(pred, "world_points", None))
 
-            prev_group_points = g_points
-            prev_group_conf = g_conf
-
-        all_depths = np.concatenate(depths_list, axis=0) if depths_list else None
-        all_confs = np.concatenate(confs_list, axis=0) if confs_list else None
-        all_intrinsics = np.concatenate(intrs_list, axis=0) if intrs_list else None
-        all_extrinsics = np.concatenate(extrs_list, axis=0) if extrs_list else None
-        all_imgs = np.concatenate(imgs_list, axis=0) if imgs_list else None
-        all_world_points = np.concatenate(world_points_list, axis=0) if world_points_list else None
+        if conf is not None:
+            conf = conf - 1.0
+        if world_points is None and depth is not None and intrinsics is not None and extrinsics is not None:
+            world_points = depth_to_point_cloud_optimized_torch(depth, intrinsics, extrinsics)
 
         result = {
-            "depth": all_depths,
-            "conf": all_confs,
-            "intrinsics": all_intrinsics,
-            "extrinsics": all_extrinsics,
-            "processed_images": all_imgs,
-            "world_points": all_world_points,
+            "depth": depth,
+            "conf": conf,
+            "intrinsics": intrinsics,
+            "extrinsics": extrinsics,
+            "processed_images": processed_images,
+            "world_points": world_points,
         }
-        if self.enable_nvs_rendering and prediction_list:
-            result["predictions"] = prediction_list
+        if self.enable_nvs_rendering and getattr(pred, "gaussians", None) is not None:
+            result["predictions"] = [pred]
         return result
 
     def _infer_pi3(self, chunk_images):
@@ -855,11 +755,11 @@ class FF3DR:
     def _is_anchor_sim3_outlier(self, s, R, t, mean_error, prev_sim3, err_hist):
         if prev_sim3 is None:
             return False
-        if len(err_hist) < 3:
-            return mean_error > 0.9
+        if len(err_hist) < 5:
+            return mean_error > 2.0
 
         med_err = float(np.median(err_hist))
-        err_threshold = max(0.55, 3.2 * med_err)
+        err_threshold = max(1.5, 4.0 * med_err)
         return mean_error > err_threshold
 
     def _refine_aligned_overlap(self, prev_points, prev_conf, cur_points, cur_conf):
@@ -1054,15 +954,15 @@ class FF3DR:
             if pre_predictions is not None:
                 points1, conf1, _, depth1 = self._chunk_to_point_arrays(pre_predictions)
                 points2, conf2, _, depth2 = self._chunk_to_point_arrays(cur_predictions)
-                overlap_frames = self.overlap
-                if overlap_frames > 0:
-                    point_map1 = self._select_anchor_from_frame_major(points1, overlap_frames, from_tail=True)
-                    point_map2 = self._select_anchor_from_frame_major(points2, overlap_frames, from_tail=False)
-                    conf_map1 = self._select_anchor_from_frame_major(conf1, overlap_frames, from_tail=True)
-                    conf_map2 = self._select_anchor_from_frame_major(conf2, overlap_frames, from_tail=False)
+                overlap_points = min(self.overlap * self.num_cameras, points1.shape[0], points2.shape[0])
+                if overlap_points > 0:
+                    point_map1 = points1[-overlap_points:]
+                    point_map2 = points2[:overlap_points]
+                    conf_map1 = conf1[-overlap_points:]
+                    conf_map2 = conf2[:overlap_points]
                     if self.config["Model"]["align_method"] == "scale+se3":
-                        depth_map1 = np.squeeze(self._select_anchor_from_frame_major(depth1, overlap_frames, from_tail=True))
-                        depth_map2 = np.squeeze(self._select_anchor_from_frame_major(depth2, overlap_frames, from_tail=False))
+                        depth_map1 = np.squeeze(depth1[-overlap_points:])
+                        depth_map2 = np.squeeze(depth2[:overlap_points])
                         depth_conf1 = np.squeeze(conf_map1)
                         depth_conf2 = np.squeeze(conf_map2)
                     else:
@@ -1124,15 +1024,16 @@ class FF3DR:
 
         prev_aligned_world_points = None
         prev_aligned_confs = None
+        num_chunks = len(chunk_indices)
 
-        for chunk_idx in range(len(chunk_indices)):
+        for chunk_idx in range(num_chunks):
             chunk_data = np.load(os.path.join(self.predictions_unaligned_dir, f"chunk_{chunk_idx}.npy"), allow_pickle=True).item()
             world_points, confs, colors, _ = self._chunk_to_point_arrays(chunk_data)
             if chunk_idx > 0:
                 s, R, t = cumulative_sim3[chunk_idx - 1]
                 world_points = apply_sim3_direct_torch(world_points, s, R, t)
                 if self.da3_use_anchor_stream and self.overlap > 0 and prev_aligned_world_points is not None:
-                    overlap_n = min(self.overlap, prev_aligned_world_points.shape[0], world_points.shape[0])
+                    overlap_n = min(self.overlap * self.num_cameras, prev_aligned_world_points.shape[0], world_points.shape[0])
                     if overlap_n > 0:
                         prev_overlap_pts = prev_aligned_world_points[-overlap_n:]
                         prev_overlap_conf = prev_aligned_confs[-overlap_n:]
@@ -1146,7 +1047,7 @@ class FF3DR:
                                 cur_overlap_conf,
                             )
                             rot_deg = self._rotation_angle_deg(rR)
-                            if rerr < 0.45 and abs(rs - 1.0) < 0.03 and rot_deg < 3.0 and np.linalg.norm(rt) < 1.5:
+                            if rerr < 0.6 and abs(rs - 1.0) < 0.05 and rot_deg < 5.0 and np.linalg.norm(rt) < 2.5:
                                 world_points = apply_sim3_direct_torch(world_points, rs, rR, rt)
                                 logger.info(
                                     "[INFO] Seam refine chunk %d: err=%.4f, rot=%.2fdeg, |t|=%.3f",
@@ -1158,9 +1059,26 @@ class FF3DR:
                         except Exception as e:
                             logger.warning("[WARN] Seam refine failed at chunk %d: %s", chunk_idx, str(e))
 
+            keep_start, keep_end = self._chunk_point_keep_bounds(chunk_idx, num_chunks, world_points.shape[0])
+            if keep_end > keep_start:
+                world_points = world_points[keep_start:keep_end]
+                confs = confs[keep_start:keep_end]
+                colors = colors[keep_start:keep_end]
+
             aligned_chunk = {"world_points": world_points, "conf": confs, "images": colors}
             np.save(os.path.join(self.predictions_aligned_dir, f"chunk_{chunk_idx}.npy"), aligned_chunk, allow_pickle=True)
-            conf_threshold = np.mean(confs) * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"]
+            cfg_save = self.config.get("Model", {}).get("Pointcloud_Save", {})
+            cfg_sample_ratio = float(cfg_save.get("sample_ratio", 1.0))
+            cfg_conf_coef = float(cfg_save.get("conf_threshold_coef", 1.0))
+
+            sample_ratio = self.pcd_sample_ratio if self.pcd_sample_ratio > 0 else cfg_sample_ratio
+            conf_coef = self.pcd_conf_threshold_coef if self.pcd_conf_threshold_coef > 0 else cfg_conf_coef
+
+            if self.pcd_conf_threshold_abs >= 0:
+                conf_threshold = self.pcd_conf_threshold_abs
+            else:
+                conf_threshold = float(np.mean(confs)) * conf_coef
+
             ply_path = os.path.join(self.predictions_pcd_dir, f"{chunk_idx}_pcd.ply")
             save_confident_pointcloud_batch(
                 points=world_points,
@@ -1168,7 +1086,7 @@ class FF3DR:
                 confs=confs,
                 output_path=ply_path,
                 conf_threshold=conf_threshold,
-                sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
+                sample_ratio=sample_ratio,
             )
             logger.info("[INFO] Saved aligned PLY: %s", ply_path)
 
@@ -1330,10 +1248,34 @@ def _build_parser(run_defaults):
         help="Fallback device string when cuda is unavailable",
     )
     parser.add_argument(
+        "--enable_da3_gsplat",
+        action="store_true",
+        default=bool(run_defaults.get("enable_da3_gsplat", False)),
+        help="Enable DA3 Gaussian Splatting rendering via gsplat (default: off)",
+    )
+    parser.add_argument(
         "--disable_nvs",
         action="store_true",
-        default=False,
-        help="Disable NVS (Novel View Synthesis) rendering (enabled by default)",
+        default=bool(run_defaults.get("disable_nvs", False)),
+        help="[Legacy] Disable NVS/gsplat rendering",
+    )
+    parser.add_argument(
+        "--pcd_sample_ratio",
+        type=float,
+        default=float(run_defaults.get("pcd_sample_ratio", -1.0)),
+        help="Pointcloud random sample ratio after confidence filtering. -1 uses config; 1.0 keeps all",
+    )
+    parser.add_argument(
+        "--pcd_conf_threshold_coef",
+        type=float,
+        default=float(run_defaults.get("pcd_conf_threshold_coef", -1.0)),
+        help="conf_threshold = mean(conf) * coef. -1 uses config",
+    )
+    parser.add_argument(
+        "--pcd_conf_threshold",
+        type=float,
+        default=float(run_defaults.get("pcd_conf_threshold", -1.0)),
+        help="Absolute confidence threshold. >=0 overrides coef-based threshold",
     )
     return parser
 

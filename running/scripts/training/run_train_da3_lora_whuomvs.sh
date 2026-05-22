@@ -28,10 +28,10 @@ DATASET_ROOT="${PROJECT_ROOT}/dataset/WHU-OMVS"
 OUTPUT_DIR="${PROJECT_ROOT}/exp/da3_large_lora_whuomvs"
 MODEL_NAME="da3-large"
 PRETRAINED_PATH=""
-GPUS="7"
+GPUS="0"
 BATCH_SIZE=2
 PROCESS_RES=504
-EPOCHS=30
+EPOCHS=20
 LR=5e-5
 WEIGHT_DECAY=1e-4
 WARMUP_STEPS=500
@@ -47,18 +47,14 @@ ADAPTER_DEPTH_NORM=600.0
 SI_WEIGHT=1.0
 LOGL1_WEIGHT=10.0
 L1_WEIGHT=1.0
-ABSREL_WEIGHT=0.5
 GRADIENT_WEIGHT=0.5
 RANGE_WEIGHT=0.1
-SCALE_REG_WEIGHT=0.01
-SHIFT_REG_WEIGHT=0.01
 NUM_WORKERS=4
 MAX_TRAIN_SAMPLES=-1
 MAX_VAL_SAMPLES=500
 MAX_TEST_SAMPLES=500
 SAVE_EVERY_N_EPOCHS=5
-VAL_INTERVAL_STEPS=0
-PRINT_EVERY_STEPS=500
+VAL_INTERVAL_STEPS=500
 SEED=42
 LOG_LEVEL=INFO
 RESUME=""
@@ -89,18 +85,14 @@ while [[ $# -gt 0 ]]; do
         --si_weight)           shift; SI_WEIGHT="$1" ;;
         --logl1_weight)        shift; LOGL1_WEIGHT="$1" ;;
         --l1_weight)           shift; L1_WEIGHT="$1" ;;
-        --absrel_weight)       shift; ABSREL_WEIGHT="$1" ;;
         --gradient_weight)     shift; GRADIENT_WEIGHT="$1" ;;
         --range_weight)        shift; RANGE_WEIGHT="$1" ;;
-        --scale_reg_weight)    shift; SCALE_REG_WEIGHT="$1" ;;
-        --shift_reg_weight)    shift; SHIFT_REG_WEIGHT="$1" ;;
         --num_workers)         shift; NUM_WORKERS="$1" ;;
         --max_train_samples)   shift; MAX_TRAIN_SAMPLES="$1" ;;
         --max_val_samples)     shift; MAX_VAL_SAMPLES="$1" ;;
         --max_test_samples)    shift; MAX_TEST_SAMPLES="$1" ;;
         --save_every_n_epochs) shift; SAVE_EVERY_N_EPOCHS="$1" ;;
         --val_interval_steps)  shift; VAL_INTERVAL_STEPS="$1" ;;
-        --print_every_steps)   shift; PRINT_EVERY_STEPS="$1" ;;
         --seed)                shift; SEED="$1" ;;
         --log_level)           shift; LOG_LEVEL="$1" ;;
         --resume)              shift; RESUME="$1" ;;
@@ -125,13 +117,7 @@ echo "LR:             ${LR}, warmup=${WARMUP_STEPS}"
 echo "LoRA:           rank=${LORA_RANK}, alpha=${LORA_ALPHA}, targets=${LORA_TARGET_MODULES}"
 echo "Adapter:        hidden=${ADAPTER_HIDDEN_DIM}, depth_norm=${ADAPTER_DEPTH_NORM}"
 echo "Loss:           SI=${SI_WEIGHT} LogL1=${LOGL1_WEIGHT} L1=${L1_WEIGHT} Grad=${GRADIENT_WEIGHT} Range=${RANGE_WEIGHT}"
-echo "Loss+Reg:       AbsRel=${ABSREL_WEIGHT} ScaleReg=${SCALE_REG_WEIGHT} ShiftReg=${SHIFT_REG_WEIGHT}"
-if [[ "${VAL_INTERVAL_STEPS}" -gt 0 ]]; then
-    echo "Val interval:   every ${VAL_INTERVAL_STEPS} steps"
-else
-    echo "Val interval:   epoch-end only (val_interval_steps=0)"
-fi
-echo "Print interval: every ${PRINT_EVERY_STEPS} steps"
+echo "Val interval:   every ${VAL_INTERVAL_STEPS} steps"
 echo "Resume:         ${RESUME:-none}"
 echo "============================================"
 
@@ -171,17 +157,13 @@ python3 -m running.training.run_train_da3_lora_whuomvs \
     --si_weight ${SI_WEIGHT} \
     --logl1_weight ${LOGL1_WEIGHT} \
     --l1_weight ${L1_WEIGHT} \
-    --absrel_weight ${ABSREL_WEIGHT} \
     --gradient_weight ${GRADIENT_WEIGHT} \
     --range_weight ${RANGE_WEIGHT} \
-    --scale_reg_weight ${SCALE_REG_WEIGHT} \
-    --shift_reg_weight ${SHIFT_REG_WEIGHT} \
     --max_train_samples ${MAX_TRAIN_SAMPLES} \
     --max_val_samples ${MAX_VAL_SAMPLES} \
     --max_test_samples ${MAX_TEST_SAMPLES} \
     --save_every_n_epochs ${SAVE_EVERY_N_EPOCHS} \
     --val_interval_steps ${VAL_INTERVAL_STEPS} \
-    --print_every_steps ${PRINT_EVERY_STEPS} \
     --seed ${SEED} \
     --log_level ${LOG_LEVEL} \
     --gpus "${GPUS}" \

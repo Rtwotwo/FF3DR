@@ -152,11 +152,50 @@ class MetricInfer:
     def _resolve_areas(self):
         if self.areas:
             return self.areas
+        if self.split == "predict":
+            return ["predict"]
         index_file = self.dataset_path / self.split / "index.txt"
-        with open(index_file, "r", encoding="utf-8") as file_handle:
-            return [line.strip() for line in file_handle.readlines() if line.strip()]
+        if index_file.is_file():
+            with open(index_file, "r", encoding="utf-8") as file_handle:
+                return [line.strip() for line in file_handle.readlines() if line.strip()]
+        area_dirs = sorted(
+            d.name
+            for d in (self.dataset_path / self.split).iterdir()
+            if d.is_dir() and d.name.startswith("area")
+        )
+        return area_dirs if area_dirs else ["default"]
 
     def _collect_samples_for_area(self, area_name):
+        if self.split == "predict":
+            return self._collect_samples_predict(area_name)
+        return self._collect_samples_test(area_name)
+
+    def _collect_samples_predict(self, area_name):
+        split_dir = self.dataset_path / self.split
+        image_dir = split_dir / "Images" / self.camera_id
+        depth_dir = split_dir / "GT" / "GT_Depths" / self.camera_id
+
+        if not image_dir.is_dir() or not depth_dir.is_dir():
+            logger.warning("[WARN] Skip missing predict dirs: %s / %s", image_dir, depth_dir)
+            return []
+
+        image_files = {path.stem: path for path in sorted(image_dir.glob("*.png"), key=_parse_stem_key)}
+        depth_files = {path.stem: path for path in sorted(depth_dir.glob("*.exr"), key=_parse_stem_key)}
+
+        common_stems = sorted(set(image_files) & set(depth_files), key=lambda value: tuple(int(part) for part in value.split("_")))
+        samples = []
+        for stem in common_stems:
+            samples.append(
+                {
+                    "stem": stem,
+                    "image_path": image_files[stem],
+                    "depth_path": depth_files[stem],
+                    "mask_path": None,
+                }
+            )
+        return samples
+
+    def _collect_samples_test(self, area_name):
         area_dir = self.dataset_path / self.split / area_name
         image_dir = area_dir / "images" / self.camera_id
         depth_dir = area_dir / "depths" / self.camera_id

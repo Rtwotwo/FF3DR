@@ -121,9 +121,12 @@ def load_ply(path: Path) -> np.ndarray:
         peek = f.read(1)
     is_binary = any("binary" in hl for hl in header_lines)
     if is_binary:
-        return load_ply_binary(path)
-    data = np.loadtxt(str(path), skiprows=len(header_lines))
-    return data[:, :3].astype(np.float32)
+        pts = load_ply_binary(path)
+    else:
+        data = np.loadtxt(str(path), skiprows=len(header_lines))
+        pts = data[:, :3].astype(np.float32)
+    finite_mask = np.all(np.isfinite(pts), axis=1)
+    return pts[finite_mask]
 
 
 def _batch_nearest_neighbor_distance(
@@ -151,8 +154,23 @@ def compute_recon_metrics(
     threshold: float = 0.5,
     batch_size: int = 500_000,
 ) -> Dict[str, float]:
-    pred_points = np.asarray(pred_points, dtype=np.float32).reshape(-1, 3)
-    gt_points = np.asarray(gt_points, dtype=np.float32).reshape(-1, 3)
+    pred_points = np.asarray(pred_points, dtype=np.float64).reshape(-1, 3)
+    gt_points = np.asarray(gt_points, dtype=np.float64).reshape(-1, 3)
+
+    pred_finite_mask = np.all(np.isfinite(pred_points), axis=1)
+    gt_finite_mask = np.all(np.isfinite(gt_points), axis=1)
+    n_pred_invalid = int((~pred_finite_mask).sum())
+    n_gt_invalid = int((~gt_finite_mask).sum())
+    if n_pred_invalid > 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Filtered %d / %d non-finite pred points (NaN/Inf)", n_pred_invalid, pred_points.shape[0])
+        pred_points = pred_points[pred_finite_mask]
+    if n_gt_invalid > 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Filtered %d / %d non-finite GT points (NaN/Inf)", n_gt_invalid, gt_points.shape[0])
+        gt_points = gt_points[gt_finite_mask]
 
     if pred_points.shape[0] == 0 or gt_points.shape[0] == 0:
         return {
@@ -198,8 +216,23 @@ def compute_recon_metrics_multi_threshold(
     thresholds: Tuple[float, ...] = (0.2, 0.5, 1.0, 2.0),
     batch_size: int = 500_000,
 ) -> Dict[str, Dict[str, float]]:
-    pred_points = np.asarray(pred_points, dtype=np.float32).reshape(-1, 3)
-    gt_points = np.asarray(gt_points, dtype=np.float32).reshape(-1, 3)
+    pred_points = np.asarray(pred_points, dtype=np.float64).reshape(-1, 3)
+    gt_points = np.asarray(gt_points, dtype=np.float64).reshape(-1, 3)
+
+    pred_finite_mask = np.all(np.isfinite(pred_points), axis=1)
+    gt_finite_mask = np.all(np.isfinite(gt_points), axis=1)
+    n_pred_invalid = int((~pred_finite_mask).sum())
+    n_gt_invalid = int((~gt_finite_mask).sum())
+    if n_pred_invalid > 0:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "Filtered %d / %d non-finite pred points (NaN/Inf)", n_pred_invalid, pred_points.shape[0])
+        pred_points = pred_points[pred_finite_mask]
+    if n_gt_invalid > 0:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "Filtered %d / %d non-finite GT points (NaN/Inf)", n_gt_invalid, gt_points.shape[0])
+        gt_points = gt_points[gt_finite_mask]
 
     if pred_points.shape[0] == 0 or gt_points.shape[0] == 0:
         return {
@@ -294,6 +327,9 @@ def unproject_depth_to_points(
     c2w[:3, :3] = R.T
     c2w[:3, 3] = -R.T @ t
     pts_world = (c2w[:3, :3] @ pts_cam.T).T + c2w[:3, 3]
+
+    finite_mask = np.all(np.isfinite(pts_world), axis=1)
+    pts_world = pts_world[finite_mask]
 
     return pts_world.astype(np.float32)
 

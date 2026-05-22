@@ -10,7 +10,14 @@ RunArgs:
   num_cameras_to_use: -1
   camera_ids: []
   da3_infer_mode: global_chunk
-  da3_stable_fusion: 1
+  da3_stable_fusion: 0
   da3_group_frames: 8
-  da3_group_overlap: 2
+  da3_group_overlap: 6
+  # DA3 gsplat rendering/export (opt-in; default off)
+  enable_da3_gsplat: 0
+  # Point cloud saving parameters
+  # -1 means fallback to configs/base_config.yaml
+  pcd_sample_ratio: 0.1
+  pcd_conf_threshold_coef: 0.5
+  pcd_conf_threshold: -1
   device: cuda

@@ -31,7 +31,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _find_repo_root(_SCRIPT_DIR)
 _RUNNING_DIR = _SCRIPT_DIR.parent
 _DA3_SRC = _REPO_ROOT / "clones" / "Depth-Anything-3" / "src"
-for path in (_REPO_ROOT, _RUNNING_DIR, _DA3_SRC):
+_MODELS_DIR = _REPO_ROOT / "models"
+for path in (_REPO_ROOT, _RUNNING_DIR, _DA3_SRC, _MODELS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -239,7 +240,7 @@ def _compute_normal_metrics(pred_normal: np.ndarray, gt_normal: np.ndarray, mask
 
 
 class PredictMetricInfer:
-    """Run feedforward model inference on WHU-OMVS predict split and compute metrics.
+    """Run feedforward model inference on WHU-OMVS predict/test split and compute metrics.
 
     The predict dataset layout:
       predict/
@@ -251,6 +252,19 @@ class PredictMetricInfer:
           GT_Mesh/
           GT_pc/
         source/{camera_info,image_info,image_path,viewpair}.txt
+
+    The test dataset layout:
+      test/
+        area2/
+          images/{cam_id}/{frame_id}.png
+          depths/{cam_id}/{frame_id}.exr
+          normals/{cam_id}/{frame_id}.exr
+          masks/{cam_id}/{frame_id}.png
+          cams/{cam_id}/{frame_id}.txt
+          info/{camera_info,image_info,...}.txt
+        area3/
+          (same structure as area2)
+        index.txt
 
     Metrics computed (matching the Ada-MVS / WHU-OMVS paper benchmark, Liu et al. 2023):
 
@@ -268,9 +282,11 @@ class PredictMetricInfer:
       - mean angular error, median angular error
     """
 
-    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None):
+    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None, split="predict", areas=None):
         self.cfg = cfg
         self.dataset_path = Path(dataset_path)
+        self.split = split
+        self.areas = areas
         self.camera_ids = [str(cid) for cid in camera_ids]
         self.batch_size = max(1, int(batch_size))
         self.align_mode = align_mode
@@ -441,6 +457,13 @@ class PredictMetricInfer:
         return depth * scale + shift
 
     def _load_dsm_infrastructure(self):
+        if self.split == "test":
+            logger.info("[INFO] test split has no DSM infrastructure, disabling DSM evaluation")
+            self.eval_dsm = False
+            self._name_to_params = None
+            self._dsm_grid = None
+            return
+
         source_dir = self.dataset_path / "source"
         camera_info_path = source_dir / "camera_info.txt"
         image_info_path = source_dir / "image_info.txt"
@@ -467,6 +490,11 @@ class PredictMetricInfer:
             logger.warning("[WARN] DSM file not found: %s, will use per-pixel elevation error only", dsm_path)
 
     def _load_gt_pointcloud(self):
+        if self.split == "test":
+            logger.info("[INFO] test split has no GT point cloud, disabling recon evaluation")
+            self.eval_recon = False
+            return
+
         gt_ply_path = self.dataset_path / "GT" / "GT_pc" / "gt.ply"
         if not gt_ply_path.exists():
             logger.warning("[WARN] GT point cloud not found: %s, disabling recon evaluation", gt_ply_path)
@@ -476,7 +504,28 @@ class PredictMetricInfer:
         self._gt_pointcloud = load_gt_ply(gt_ply_path)
         logger.info("[INFO] GT point cloud loaded: %d points", self._gt_pointcloud.shape[0])
 
+    def _resolve_areas(self):
+        if self.areas:
+            return self.areas
+        if self.split == "predict":
+            return [None]
+        index_file = self.dataset_path / "index.txt"
+        if index_file.exists():
+            with open(index_file, "r", encoding="utf-8") as fh:
+                return [line.strip() for line in fh.readlines() if line.strip()]
+        area_dirs = sorted([d.name for d in self.dataset_path.iterdir() if d.is_dir() and d.name.startswith("area")])
+        return area_dirs if area_dirs else [None]
+
     def _collect_samples_for_camera(self, cam_id: str) -> List[Dict]:
+        if self.split == "test":
+            all_samples = []
+            for area_name in self._resolve_areas():
+                area_samples = self._collect_samples_for_area_camera(area_name, cam_id)
+                for s in area_samples:
+                    s["area"] = area_name
+                all_samples.extend(area_samples)
+            return all_samples
+
         image_dir = self.dataset_path / "Images" / cam_id
         depth_dir = self.dataset_path / "GT" / "GT_Depths" / cam_id
         normal_dir = self.dataset_path / "GT" / "GT_Normals" / cam_id
@@ -504,7 +553,44 @@ class PredictMetricInfer:
                 "image_path": image_files[stem],
                 "depth_path": depth_files[stem],
                 "normal_path": normal_files.get(stem),
+                "mask_path": None,
                 "cam_id": cam_id,
+                "area": None,
+            }
+            samples.append(sample)
+        return samples
+
+    def _collect_samples_for_area_camera(self, area_name: str, cam_id: str) -> List[Dict]:
+        area_dir = self.dataset_path / area_name
+        image_dir = area_dir / "images" / cam_id
+        depth_dir = area_dir / "depths" / cam_id
+        mask_dir = area_dir / "masks" / cam_id
+        normal_dir = area_dir / "normals" / cam_id
+
+        if not image_dir.is_dir() or not depth_dir.is_dir():
+            logger.warning("[WARN] Skip missing area/camera: %s/%s", area_name, cam_id)
+            return []
+
+        image_files = {p.stem: p for p in sorted(image_dir.glob("*.png"), key=_parse_stem_key)}
+        depth_files = {p.stem: p for p in sorted(depth_dir.glob("*.exr"), key=_parse_stem_key)}
+        mask_files = {p.stem: p for p in sorted(mask_dir.glob("*.png"), key=_parse_stem_key)} if mask_dir.is_dir() else {}
+        normal_files = {p.stem: p for p in sorted(normal_dir.glob("*.exr"), key=_parse_stem_key)} if normal_dir.is_dir() else {}
+
+        common_stems = sorted(
+            set(image_files) & set(depth_files),
+            key=lambda s: tuple(int(part) for part in s.split("_")),
+        )
+
+        samples = []
+        for stem in common_stems:
+            sample = {
+                "stem": stem,
+                "image_path": image_files[stem],
+                "depth_path": depth_files[stem],
+                "normal_path": normal_files.get(stem),
+                "mask_path": mask_files.get(stem),
+                "cam_id": cam_id,
+                "area": area_name,
             }
             samples.append(sample)
         return samples
@@ -878,6 +964,8 @@ class PredictMetricInfer:
 
     def run(self):
         per_camera_results = {}
+        per_area_results = {}
+        area_accumulators = {}
         overall_accumulator = AdaMVSMetricAccumulator(
             outlier_threshold=self.outlier_threshold,
             align_mode=self.align_mode,
@@ -888,6 +976,7 @@ class PredictMetricInfer:
         overall_normal_metrics = {"mean_ang_error": [], "median_ang_error": [], "normal_valid_count": 0}
         overall_pred_points_list = []
         cam_pred_points_map = {}
+        area_pred_points_map = {}
 
         pred_dsm_sum = None
         pred_dsm_count = None
@@ -944,7 +1033,7 @@ class PredictMetricInfer:
                         pred_depth = batch_pred[batch_index]
                         pred_conf = None
                     gt_depth = _load_exr_single_channel(sample["depth_path"])
-                    mask = np.ones(gt_depth.shape, dtype=np.float32)
+                    mask = _load_mask(sample.get("mask_path"), gt_depth.shape)
                     pred_depth = self._prepare_prediction(pred_depth, gt_depth)
 
                     if pred_conf is not None and pred_conf.shape != gt_depth.shape:
@@ -964,6 +1053,15 @@ class PredictMetricInfer:
                         depth_scale = 1.0
 
                     cam_accumulator.update(pred_depth_aligned, gt_depth, mask)
+
+                    area_name = sample.get("area")
+                    if area_name is not None:
+                        if area_name not in area_accumulators:
+                            area_accumulators[area_name] = AdaMVSMetricAccumulator(
+                                outlier_threshold=self.outlier_threshold,
+                                align_mode=self.align_mode,
+                            )
+                        area_accumulators[area_name].update(pred_depth_aligned, gt_depth, mask)
 
                     if self.eval_recon and self._gt_pointcloud is not None and self._name_to_params is not None:
                         image_name = "{}/{}.png".format(cam_id, sample["stem"])
@@ -1175,13 +1273,18 @@ class PredictMetricInfer:
                 if cam_key in per_camera_results:
                     per_camera_results[cam_key]["recon"] = cam_recon
 
+        for area_name, area_accum in area_accumulators.items():
+            per_area_results[area_name] = {"depth": area_accum.finalize()}
+
         return {
             "model_name": self.model_name,
+            "split": self.split,
             "dataset_path": str(self.dataset_path),
             "camera_ids": self.camera_ids,
             "align_mode": self.align_mode,
             "outlier_threshold": self.outlier_threshold,
             "per_camera": per_camera_results,
+            "per_area": per_area_results if per_area_results else None,
             "overall": overall_result,
         }
 
@@ -1383,6 +1486,17 @@ def _print_results(results):
         ))
         print("-" * 120)
 
+    per_area = results.get("per_area")
+    if per_area:
+        print()
+        print("=== Per-Area Depth Metrics ===")
+        for area_name, area_result in sorted(per_area.items()):
+            area_depth = area_result["depth"]
+            print("  {}:".format(area_name))
+            print("    Ada-MVS:   " + " | ".join("{:>12}".format(_format_metric(area_depth[h])) for h in ada_mvs_headers))
+            print("    Standard:  " + " | ".join("{:>12}".format(_format_metric(area_depth[h])) for h in standard_headers))
+        print("-" * 120)
+
     for cam_key, cam_result in results["per_camera"].items():
         cam_depth = cam_result["depth"]
         print()
@@ -1412,7 +1526,7 @@ def _print_results(results):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="WHU-OMVS predict split metric inference (Ada-MVS benchmark metrics)"
+        description="WHU-OMVS predict/test split metric inference (Ada-MVS benchmark metrics)"
     )
     parser.add_argument(
         "--config_path",
@@ -1421,10 +1535,23 @@ def parse_args():
         help="Path to the model config file.",
     )
     parser.add_argument(
+        "--split",
+        type=str,
+        default="predict",
+        choices=["predict", "test"],
+        help="Dataset split: 'predict' or 'test'. Default: predict.",
+    )
+    parser.add_argument(
+        "--areas",
+        nargs="*",
+        default=None,
+        help="Optional list of area names for test split (e.g., area2 area3). Defaults to index.txt.",
+    )
+    parser.add_argument(
         "--dataset_path",
         type=str,
-        default=str(_REPO_ROOT / "dataset" / "WHU-OMVS" / "predict"),
-        help="Path to the WHU-OMVS predict directory.",
+        default=None,
+        help="Path to the WHU-OMVS dataset directory. Defaults to dataset/WHU-OMVS/{split}.",
     )
     parser.add_argument(
         "--camera_ids",
@@ -1545,7 +1672,13 @@ def main():
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
     config_path = _resolve_path(args.config_path)
-    dataset_path = _resolve_path(args.dataset_path)
+
+    split = args.split
+    if args.dataset_path is not None:
+        dataset_path = _resolve_path(args.dataset_path)
+    else:
+        dataset_path = str(_REPO_ROOT / "dataset" / "WHU-OMVS" / split)
+
     output_path = Path(_resolve_path(args.output_path))
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -1581,12 +1714,17 @@ def main():
         recon_threshold=args.recon_threshold,
         recon_stride=args.recon_stride,
         lora_checkpoint=args.lora_checkpoint,
+        split=split,
+        areas=args.areas,
     )
     results = runner.run()
     _print_results(results)
 
     cam_suffix = "_".join("cam{}".format(c) for c in camera_ids)
-    output_file = output_path / "predict_{}_{}_metrics.json".format(cam_suffix, results["model_name"])
+    area_suffix = ""
+    if results.get("per_area"):
+        area_suffix = "_" + "_".join(sorted(results["per_area"].keys()))
+    output_file = output_path / "{}_{}_{}{}_metrics.json".format(split, cam_suffix, results["model_name"], area_suffix)
     with open(output_file, "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2)
     logger.info("[INFO] Metrics saved to %s", output_file)

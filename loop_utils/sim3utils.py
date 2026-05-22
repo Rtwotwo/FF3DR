@@ -972,8 +972,14 @@ def compute_scale_ransac(
         depth2: (n2, h, w)
         conf1: (n1, h, w)
         conf2: (n2, h, w)
-
     """
+    n1 = depth1.shape[0]
+    n2 = depth2.shape[0]
+    n = min(n1, n2)
+    depth1 = depth1[:n]
+    depth2 = depth2[:n]
+    conf1 = conf1[:n]
+    conf2 = conf2[:n]
 
     depth1_flat = depth1.reshape(-1)
     depth2_flat = depth2.reshape(-1)
@@ -1043,6 +1049,14 @@ def compute_scale_weighted(
         conf1: (n1, h, w)
         conf2: (n2, h, w)
     """
+    n1 = depth1.shape[0]
+    n2 = depth2.shape[0]
+    n = min(n1, n2)
+    depth1 = depth1[:n]
+    depth2 = depth2[:n]
+    conf1 = conf1[:n]
+    conf2 = conf2[:n]
+
     depth1_flat = depth1.reshape(-1)
     depth2_flat = depth2.reshape(-1)
     conf1_flat = conf1.reshape(-1)
