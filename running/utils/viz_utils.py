@@ -1,3 +1,74 @@
+import cv2
+import numpy as np
+from pathlib import Path
+
+
+def depth_to_color(depth_map, vmin=None, vmax=None, cmap=cv2.COLORMAP_TURBO):
+    """Convert a single-channel depth map to an 8-bit BGR color image.
+
+    - depth_map: numpy array (H,W) float. May contain NaN/Inf for invalid pixels.
+    - vmin/vmax: if None, computed from finite values in depth_map.
+    - cmap: OpenCV colormap id (default: COLORMAP_TURBO).
+    Returns uint8 BGR image.
+    """
+    if depth_map is None:
+        return None
+    depth = np.asarray(depth_map, dtype=np.float32)
+    h, w = depth.shape[:2]
+    valid = np.isfinite(depth)
+    if not np.any(valid):
+        return np.zeros((h, w, 3), dtype=np.uint8)
+    if vmin is None:
+        vmin = float(np.min(depth[valid]))
+    if vmax is None:
+        vmax = float(np.max(depth[valid]))
+    if vmax - vmin < 1e-8:
+        vmax = vmin + 1.0
+    norm = np.clip((depth - vmin) / (vmax - vmin), 0.0, 1.0)
+    norm_uint8 = (norm * 255.0).astype(np.uint8)
+    color = cv2.applyColorMap(norm_uint8, cmap)
+    # set invalid pixels to black
+    color[~valid] = 0
+    return color
+
+
+def conf_to_color(conf_map, vmin=0.0, vmax=1.0, cmap=cv2.COLORMAP_JET):
+    """Convert a confidence map to color (BGR uint8)."""
+    if conf_map is None:
+        return None
+    conf = np.asarray(conf_map, dtype=np.float32)
+    h, w = conf.shape[:2]
+    valid = np.isfinite(conf)
+    if not np.any(valid):
+        return np.zeros((h, w, 3), dtype=np.uint8)
+    norm = np.clip((conf - vmin) / (vmax - vmin + 1e-10), 0.0, 1.0)
+    norm_uint8 = (norm * 255.0).astype(np.uint8)
+    color = cv2.applyColorMap(norm_uint8, cmap)
+    color[~valid] = 0
+    return color
+
+
+def overlay_depth_on_rgb(rgb_bgr, depth_color_bgr, alpha=0.5):
+    """Overlay depth color on top of a BGR image."""
+    if rgb_bgr is None or depth_color_bgr is None:
+        return None
+    if rgb_bgr.ndim == 2:
+        rgb_bgr = cv2.cvtColor(rgb_bgr, cv2.COLOR_GRAY2BGR)
+    if rgb_bgr.shape[:2] != depth_color_bgr.shape[:2]:
+        depth_color_bgr = cv2.resize(depth_color_bgr, (rgb_bgr.shape[1], rgb_bgr.shape[0]))
+    blended = cv2.addWeighted(rgb_bgr, 1.0 - alpha, depth_color_bgr, alpha, 0)
+    return blended
+
+
+def save_depth_and_conf(depth_map, conf_map, depth_path: str, conf_path: str, vmin=None, vmax=None):
+    Path(depth_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(conf_path).parent.mkdir(parents=True, exist_ok=True)
+    depth_color = depth_to_color(depth_map, vmin=vmin, vmax=vmax)
+    conf_color = conf_to_color(conf_map)
+    if depth_color is not None:
+        cv2.imwrite(depth_path, depth_color)
+    if conf_color is not None:
+        cv2.imwrite(conf_path, conf_color)
 """
 python /data2/dataset/Redal/work_feedforward_3drepo/running/utils/viz_utils.py \
     --input_dir /data2/dataset/Redal/work_feedforward_3drepo/dataset/MatrixCity/big_city_depth/aerial/train/big_high_block_1_depth \

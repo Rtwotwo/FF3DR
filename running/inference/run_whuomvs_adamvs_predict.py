@@ -24,6 +24,7 @@ from running.training.datasets_adamvs import find_dataset_def
 from running.utils.adamvs_utils import *
 from running.training.datasets_adamvs.data_io import save_pfm, write_red_cam, read_pfm
 import matplotlib.pyplot as plt
+from running.utils.viz_utils import depth_to_color, conf_to_color, save_depth_and_conf
 
 from running.metrics.dsm_metrics import (
     CameraParams, ImageParams, DSMGrid,
@@ -474,17 +475,18 @@ def _process_sample(model, sample, output_folder, step):
         size2 = len(depth_est[1])
         e = np.ones((size1, size2), dtype=np.float32)
         out_init_depth_image = e * 36000 - depth_est
+        # Normalize and convert to BGR color images using the shared viz utils
         color_depth_map_path = output_folder2 + ('/color/%s_init.png' % name)
         color_prob_map_path = output_folder2 + ('/color/%s_prob.png' % name)
 
-        for i in range(out_init_depth_image.shape[1]):
-            col = out_init_depth_image[:, i]
-            col[np.isinf(col)] = np.nan
-            col[np.isnan(col)] = np.nanmin(col) - 1
-            out_init_depth_image[:, i] = col
-
-        plt.imsave(color_depth_map_path, out_init_depth_image, format='png')
-        plt.imsave(color_prob_map_path,  np.nan_to_num(prob).clip(0, 1), format='png')
+        # replace inf with nan so viz_utils ignores them
+        out_init_depth_image = np.where(np.isinf(out_init_depth_image), np.nan, out_init_depth_image)
+        # use viz utils to save colored PNGs (depth uses COLORMAP_TURBO)
+        depth_color = depth_to_color(out_init_depth_image)
+        prob_color = conf_to_color(np.nan_to_num(prob).clip(0, 1))
+        import cv2 as _cv2
+        _cv2.imwrite(color_depth_map_path, depth_color)
+        _cv2.imwrite(color_prob_map_path, prob_color)
 
     save_pfm(init_depth_map_path, depth_est)
     save_pfm(prob_map_path, prob)

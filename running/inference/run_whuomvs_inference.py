@@ -60,44 +60,11 @@ from models.pi3.models.pi3 import Pi3
 from models.vggt.models.vggt import VGGT
 logger = logging.getLogger(__name__)
 
-
-def _depth_to_color(depth_map, vmin=None, vmax=None, cmap=cv2.COLORMAP_TURBO):
-    h, w = depth_map.shape[:2]
-    valid = np.isfinite(depth_map)
-    if not np.any(valid):
-        return np.zeros((h, w, 3), dtype=np.uint8)
-    if vmin is None:
-        vmin = float(np.min(depth_map[valid]))
-    if vmax is None:
-        vmax = float(np.max(depth_map[valid]))
-    if vmax - vmin < 1e-8:
-        vmax = vmin + 1.0
-    norm = np.clip((depth_map - vmin) / (vmax - vmin), 0.0, 1.0)
-    norm_uint8 = (norm * 255).astype(np.uint8)
-    color = cv2.applyColorMap(norm_uint8, cmap)
-    color[~valid] = 0
-    return color
+# unified viz utilities
+from running.utils.viz_utils import depth_to_color as _depth_to_color, conf_to_color as _conf_to_color, overlay_depth_on_rgb as _overlay_depth_on_rgb
 
 
-def _conf_to_color(conf_map, vmin=0.0, vmax=1.0):
-    h, w = conf_map.shape[:2]
-    valid = np.isfinite(conf_map)
-    if not np.any(valid):
-        return np.zeros((h, w, 3), dtype=np.uint8)
-    norm = np.clip((conf_map - vmin) / (vmax - vmin + 1e-10), 0.0, 1.0)
-    norm_uint8 = (norm * 255).astype(np.uint8)
-    color = cv2.applyColorMap(norm_uint8, cv2.COLORMAP_JET)
-    color[~valid] = 0
-    return color
 
-
-def _overlay_depth_on_rgb(rgb, depth_color, alpha=0.5):
-    if rgb.ndim == 2:
-        rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
-    if rgb.shape[:2] != depth_color.shape[:2]:
-        depth_color = cv2.resize(depth_color, (rgb.shape[1], rgb.shape[0]))
-    blended = cv2.addWeighted(rgb, 1.0 - alpha, depth_color, alpha, 0)
-    return blended
 
 
 class FF3DR:
@@ -1054,7 +1021,11 @@ class FF3DR:
             config=self.config,
         )
         logger.info("[INFO] Running loop detection on: %s", anchor_dir)
-        detector.run()
+        res = detector.run()
+        # detector.run() may return early (None) when no images are found.
+        if res is None or getattr(detector, "loop_closures", None) is None:
+            logger.info("[INFO] No images found for loop detection or no loop closures")
+            return []
         loop_list = detector.get_loop_list()
         if len(loop_list) == 0:
             logger.info("[INFO] No loop closures detected")

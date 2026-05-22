@@ -11,10 +11,10 @@
 
 TRAIN_TEST_SPLIT="predict"
 MODEL_NAME="depthanything3"
-CAMERA_IDS=(5)
+CAMERA_IDS=(1 2 3 4 5)
 CHUNK_SIZE=60
-OVERLAP=24
-GPU_ID=3
+OVERLAP=30
+GPU_ID=5
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INFERENCE_SCRIPT="${SCRIPT_DIR}/../../inference/run_whuomvs_inference.py"
@@ -29,7 +29,7 @@ echo " GPU: ${GPU_ID}"
 echo "=============================================="
 
 for CAME_ID in "${CAMERA_IDS[@]}"; do
-    OUTPUT_PATH="./exp/whu-omvs/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_came${CAME_ID}"
+    OUTPUT_PATH="./exp/whu-omvs/viz_predict/run_whuomvs_${MODEL_NAME}_${TRAIN_TEST_SPLIT}_came${CAME_ID}"
 
     echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running: came${CAME_ID}..."
     CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$INFERENCE_SCRIPT" \
