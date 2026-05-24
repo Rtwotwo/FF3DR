@@ -4,6 +4,7 @@ import math
 import os
 import sys
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -23,7 +24,6 @@ if PROJECT_ROOT not in sys.path:
 from running.training.datasets_adamvs import find_dataset_def
 from running.utils.adamvs_utils import *
 from running.training.datasets_adamvs.data_io import save_pfm, write_red_cam, read_pfm
-import matplotlib.pyplot as plt
 from running.utils.viz_utils import depth_to_color, conf_to_color, save_depth_and_conf
 
 from running.metrics.dsm_metrics import (
@@ -57,7 +57,7 @@ parser.add_argument('--resize_scale', type=float, default=0.5, help='output scal
 parser.add_argument('--sample_scale', type=float, default=1, help='Downsample scale for building cost volume (W and H)')
 parser.add_argument('--interval_scale', type=float, default=1, help='the number of depth values')
 parser.add_argument('--batch_size', type=int, default=1, help='train batch size')
-parser.add_argument('--display', default=True, help='display depth images')
+parser.add_argument('--display', default=False, help='display depth images')
 
 # Cascade parameters
 parser.add_argument('--share_cr', action='store_true', help='whether share the cost volume regularization')
@@ -75,10 +75,11 @@ parser.add_argument('--test_max_samples_per_camera', type=int, default=20,
 parser.add_argument('--eval_metrics', action='store_true', help='Evaluate depth and DSM metrics after inference')
 parser.add_argument('--dataset_path', type=str, default=None, help='Dataset root path for GT data. Defaults to dataset/WHU-OMVS/{split}.')
 parser.add_argument('--outlier_threshold', type=float, default=20.0, help='Outlier threshold in meters for DSM MAE computation')
-parser.add_argument('--align_mode', type=str, default='none', choices=['none', 'median'], help='Depth alignment mode for depth metrics (Ada-MVS outputs metric depth, so none is default)')
+parser.add_argument('--align_mode', type=str, default='median', choices=['none', 'median'], help='Depth alignment mode for depth metrics.')
 
 # parse arguments and check
 args = parser.parse_args()
+args.display = str(args.display).lower() in ('1', 'true', 'yes', 'on')
 print("argv:", sys.argv[1:])
 print_args(args)
 
@@ -112,6 +113,95 @@ def _load_exr_depth(exr_path):
     return depth
 
 
+def _collect_depth_metric_result(output_folder, dataset_path, split="predict", area_name=None):
+    if split == "test":
+        area_dir = os.path.join(dataset_path, area_name) if area_name else dataset_path
+    else:
+        area_dir = dataset_path
+
+    cam_ids = sorted([d for d in os.listdir(output_folder)
+                      if os.path.isdir(os.path.join(output_folder, d)) and d.isdigit()])
+    overall_accumulator = DepthMetricAccumulator(align_mode=args.align_mode)
+    per_camera_accumulators = {}
+    total_frames = 0
+
+    for cam_id in cam_ids:
+        cam_dir = os.path.join(output_folder, cam_id)
+        if split == "test":
+            gt_depth_dir = os.path.join(area_dir, "depths", cam_id)
+        else:
+            gt_depth_dir = os.path.join(dataset_path, "GT", "GT_Depths", cam_id)
+
+        if not os.path.isdir(gt_depth_dir):
+            print("[WARN] GT depth dir not found: {}".format(gt_depth_dir))
+            continue
+
+        cam_accumulator = per_camera_accumulators.setdefault(
+            cam_id, DepthMetricAccumulator(align_mode=args.align_mode)
+        )
+
+        pfm_files = sorted([f for f in os.listdir(cam_dir) if f.endswith("_init.pfm")])
+        for pfm_file in pfm_files:
+            stem = pfm_file.replace("_init.pfm", "")
+            pred_depth_path = os.path.join(cam_dir, pfm_file)
+            gt_depth_path = os.path.join(gt_depth_dir, stem + ".exr")
+
+            if not os.path.exists(gt_depth_path):
+                print("[WARN] GT depth not found: {}".format(gt_depth_path))
+                continue
+
+            pred_depth, _ = read_pfm(pred_depth_path)
+            gt_depth = _load_exr_depth(gt_depth_path)
+
+            if pred_depth.shape != gt_depth.shape:
+                pred_depth = cv2.resize(
+                    pred_depth,
+                    (gt_depth.shape[1], gt_depth.shape[0]),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+
+            if split == "test":
+                mask_path = os.path.join(area_dir, "masks", cam_id, stem + ".png")
+                if os.path.exists(mask_path):
+                    mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                    mask = (mask_img > 127) & (gt_depth > 1e-8) & (pred_depth > 1e-8)
+                else:
+                    mask = (gt_depth > 1e-8) & (pred_depth > 1e-8)
+            else:
+                mask = (gt_depth > 1e-8) & (pred_depth > 1e-8)
+
+            if mask.sum() == 0:
+                continue
+
+            cam_accumulator.update(pred_depth, gt_depth, mask)
+            overall_accumulator.update(pred_depth, gt_depth, mask)
+            total_frames += 1
+
+    per_camera = {
+        "cam{}".format(cam_id): {"depth": acc.finalize()}
+        for cam_id, acc in per_camera_accumulators.items()
+    }
+    overall_depth = overall_accumulator.finalize()
+    per_area = {area_name: {"depth": overall_depth}} if area_name is not None else None
+
+    result = {
+        "model_name": "adamvs",
+        "split": split,
+        "dataset_path": dataset_path,
+        "camera_ids": cam_ids,
+        "camera_id": "all",
+        "align_mode": args.align_mode,
+        "per_camera": per_camera,
+        "per_area": per_area,
+        "overall": {"depth": overall_depth},
+        "total_frames": total_frames,
+    }
+    if split == "predict":
+        result["outlier_threshold"] = args.outlier_threshold
+
+    return result, overall_accumulator, per_camera_accumulators
+
+
 def evaluate_metrics(output_folder, dataset_path, split="predict", area_name=None):
     print("\n" + "=" * 60)
     print("Evaluating Ada-MVS depth and DSM metrics (split={}, area={})".format(split, area_name))
@@ -123,7 +213,7 @@ def evaluate_metrics(output_folder, dataset_path, split="predict", area_name=Non
     source_dir = os.path.join(dataset_path, "source")
     camera_info_path = os.path.join(source_dir, "camera_info.txt")
     image_info_path = os.path.join(source_dir, "image_info.txt")
-    dsm_path = os.path.join(dataset_path, "GT", "GT_DSM", "dsm", "0_0.tif")
+    dsm_path = Path(dataset_path) / "GT" / "GT_DSM" / "dsm" / "0_0.tif"
 
     camera_params = load_camera_params(camera_info_path)
     image_params = load_image_params(image_info_path)
@@ -131,20 +221,22 @@ def evaluate_metrics(output_folder, dataset_path, split="predict", area_name=Non
     print("[INFO] Loaded {} image-camera param pairs".format(len(name_to_params)))
 
     dsm_grid = None
-    if os.path.exists(dsm_path):
+    if dsm_path.exists():
         dsm_grid = load_dsm_tif(dsm_path)
         print("[INFO] Loaded DSM grid: {}x{}, GSD={:.2f}m".format(
             dsm_grid.width, dsm_grid.height, dsm_grid.gsd))
     else:
         print("[WARN] DSM file not found: {}, will use per-pixel elevation error only".format(dsm_path))
 
-    depth_accumulator = DepthMetricAccumulator(align_mode=args.align_mode)
+    depth_result, depth_accumulator, per_camera_accumulators = _collect_depth_metric_result(
+        output_folder, dataset_path, split="predict", area_name=None
+    )
     dsm_accumulator = DSMMetricAccumulator(outlier_threshold=args.outlier_threshold)
 
-    cam_ids = sorted([d for d in os.listdir(output_folder)
-                      if os.path.isdir(os.path.join(output_folder, d)) and d.isdigit()])
-
-    total_frames = 0
+    cam_ids = depth_result["camera_ids"]
+    per_camera_results = depth_result["per_camera"]
+    total_frames = depth_result["total_frames"]
+    dsm_frames = 0
     for cam_id in cam_ids:
         cam_dir = os.path.join(output_folder, cam_id)
         gt_depth_dir = os.path.join(dataset_path, "GT", "GT_Depths", cam_id)
@@ -162,16 +254,6 @@ def evaluate_metrics(output_folder, dataset_path, split="predict", area_name=Non
             pred_depth, _ = read_pfm(pred_depth_path)
             gt_depth = _load_exr_depth(gt_depth_path)
 
-            mask = (gt_depth > 1e-8) & (pred_depth > 1e-8)
-            if mask.sum() == 0:
-                continue
-
-            if pred_depth.shape != gt_depth.shape:
-                pred_depth = cv2.resize(pred_depth, (gt_depth.shape[1], gt_depth.shape[0]),
-                                        interpolation=cv2.INTER_LINEAR)
-
-            depth_accumulator.update(pred_depth, gt_depth, mask)
-
             image_name = "{}/{}.png".format(cam_id, stem)
             param_pair = name_to_params.get(image_name)
             if param_pair is not None:
@@ -184,14 +266,13 @@ def evaluate_metrics(output_folder, dataset_path, split="predict", area_name=Non
                 )
                 dsm_accumulator.update(elevation_error, valid)
 
-                if dsm_grid is not None and total_frames < 5:
+                if dsm_grid is not None and dsm_frames < 5:
                     pred_dsm = depth_to_dsm(
                         pred_depth, cam_param, img_param, dsm_grid,
                         downsample_factor=downsample_factor,
                     )
-            total_frames += 1
+            dsm_frames += 1
 
-    depth_metrics = depth_accumulator.finalize()
     dsm_metrics = dsm_accumulator.finalize()
 
     dsm_output = None
@@ -202,10 +283,12 @@ def evaluate_metrics(output_folder, dataset_path, split="predict", area_name=Non
         "model_name": "adamvs",
         "split": "predict",
         "dataset_path": dataset_path,
+        "camera_ids": cam_ids,
         "camera_id": "all",
         "align_mode": args.align_mode,
-        "areas": {"predict": depth_metrics},
-        "overall": depth_metrics,
+        "per_camera": per_camera_results,
+        "per_area": None,
+        "overall": {"depth": depth_result["overall"]["depth"]},
         "dsm_metrics": dsm_output,
         "total_frames": total_frames,
         "outlier_threshold": args.outlier_threshold,
@@ -214,11 +297,12 @@ def evaluate_metrics(output_folder, dataset_path, split="predict", area_name=Non
     print("\n" + "=" * 60)
     print("WHU-OMVS Ada-MVS Depth Metrics")
     print("=" * 60)
-    print("model={} split=predict camera=all align={}".format(args.align_mode))
+    print("model=adamvs split={} camera=all align={}".format(split, args.align_mode))
     headers = ["abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog", "delta1", "delta2", "delta3"]
     col_width = 12
     print(f"{'':>8} | " + " | ".join(f"{h:>{col_width}}" for h in headers))
     print("-" * (10 + len(headers) * (col_width + 3)))
+    depth_metrics = depth_result["overall"]["depth"]
     values = " | ".join(f"{depth_metrics.get(h, 0):>{col_width}.6f}" for h in headers)
     print(f"{'predict':>8} | {values}")
     print("-" * (10 + len(headers) * (col_width + 3)))
@@ -240,90 +324,22 @@ def evaluate_metrics(output_folder, dataset_path, split="predict", area_name=Non
         json.dump(result, f, indent=2)
     print("\n[INFO] Metrics saved to {}".format(metrics_file))
 
-    return result, depth_accumulator
+    return result, depth_accumulator, per_camera_accumulators
 
 
 def _evaluate_test_metrics(output_folder, dataset_path, area_name=None):
     print("[INFO] test split: evaluating depth metrics for area={}".format(area_name))
 
-    area_dir = os.path.join(dataset_path, area_name) if area_name else dataset_path
+    per_area_result, overall_accumulator, per_camera_accumulators = _collect_depth_metric_result(
+        output_folder, dataset_path, split="test", area_name=area_name
+    )
 
-    depth_accumulator = DepthMetricAccumulator(align_mode=args.align_mode)
-
-    cam_ids = sorted([d for d in os.listdir(output_folder)
-                      if os.path.isdir(os.path.join(output_folder, d)) and d.isdigit()])
-
-    total_frames = 0
-    for cam_id in cam_ids:
-        cam_dir = os.path.join(output_folder, cam_id)
-        gt_depth_dir = os.path.join(area_dir, "depths", cam_id)
-
-        if not os.path.isdir(gt_depth_dir):
-            print("[WARN] GT depth dir not found: {}".format(gt_depth_dir))
-            continue
-
-        pfm_files = sorted([f for f in os.listdir(cam_dir) if f.endswith("_init.pfm")])
-        for pfm_file in pfm_files:
-            stem = pfm_file.replace("_init.pfm", "")
-            pred_depth_path = os.path.join(cam_dir, pfm_file)
-            gt_depth_path = os.path.join(gt_depth_dir, stem + ".exr")
-
-            if not os.path.exists(gt_depth_path):
-                continue
-
-            pred_depth, _ = read_pfm(pred_depth_path)
-            gt_depth = _load_exr_depth(gt_depth_path)
-
-            if pred_depth.shape != gt_depth.shape:
-                pred_depth = cv2.resize(
-                    pred_depth,
-                    (gt_depth.shape[1], gt_depth.shape[0]),
-                    interpolation=cv2.INTER_LINEAR,
-                )
-
-            mask_path = os.path.join(area_dir, "masks", cam_id, stem + ".png")
-            if os.path.exists(mask_path):
-                mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                mask = (mask_img > 127) & (gt_depth > 1e-8) & (pred_depth > 1e-8)
-            else:
-                mask = (gt_depth > 1e-8) & (pred_depth > 1e-8)
-
-            if mask.sum() == 0:
-                continue
-
-            depth_accumulator.update(pred_depth, gt_depth, mask)
-            total_frames += 1
-
-    depth_metrics = depth_accumulator.finalize()
-
-    print("\n" + "=" * 60)
-    print("WHU-OMVS Ada-MVS Depth Metrics [test/{}]".format(area_name))
-    print("=" * 60)
-    headers = ["abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "silog", "delta1", "delta2", "delta3"]
-    col_width = 12
-    print(f"{'':>8} | " + " | ".join(f"{h:>{col_width}}" for h in headers))
-    print("-" * (10 + len(headers) * (col_width + 3)))
-    values = " | ".join(f"{depth_metrics.get(h, 0):>{col_width}.6f}" for h in headers)
-    print(f"{'area':>8} | {values}")
-    print("=" * 60)
-    print("[INFO] test split: DSM metrics and recon metrics skipped (no GT available)")
-
-    per_area_result = {
-        "model_name": "adamvs",
-        "split": "test",
-        "dataset_path": dataset_path,
-        "camera_id": "all",
-        "align_mode": args.align_mode,
-        "areas": {area_name: depth_metrics},
-        "overall": depth_metrics,
-        "total_frames": total_frames,
-    }
     area_metrics_file = os.path.join(output_folder, "adamvs_metrics.json")
     with open(area_metrics_file, "w") as f:
         json.dump(per_area_result, f, indent=2)
     print("[INFO] Per-area metrics saved to {}".format(area_metrics_file))
 
-    return depth_metrics, depth_accumulator
+    return per_area_result, overall_accumulator, per_camera_accumulators
 
 
 # run MVS model to save depth maps and confidence maps
@@ -368,6 +384,7 @@ def _predict_depth_test():
     model = _build_model()
     all_area_metrics = {}
     all_area_accumulators = {}
+    all_area_camera_accumulators = {}
 
     for area_name in areas:
         print("\n" + "=" * 60)
@@ -393,8 +410,11 @@ def _predict_depth_test():
             first_start_time = time.time()
             test_viz_limit = 20
             original_display = args.display
+            max_samples_per_camera = args.test_max_samples_per_camera
 
             for batch_idx, sample in enumerate(TestImgLoader):
+                if max_samples_per_camera > 0 and step >= max_samples_per_camera:
+                    break
                 if step < test_viz_limit:
                     args.display = original_display
                 else:
@@ -406,12 +426,13 @@ def _predict_depth_test():
             print("Area {} done, total_cnt = {}, total_time = {:3f}".format(area_name, step, time.time() - first_start_time))
 
         if args.eval_metrics:
-            area_metrics, area_accum = evaluate_metrics(output_folder, args.dataset_path, split="test", area_name=area_name)
+            area_metrics, area_accum, area_camera_accums = evaluate_metrics(output_folder, args.dataset_path, split="test", area_name=area_name)
             all_area_metrics[area_name] = area_metrics
             all_area_accumulators[area_name] = area_accum
+            all_area_camera_accumulators[area_name] = area_camera_accums
 
     if args.eval_metrics and all_area_metrics:
-        _save_test_summary(all_area_metrics, all_area_accumulators)
+        _save_test_summary(all_area_metrics, all_area_accumulators, all_area_camera_accumulators)
 
 
 def _build_model():
@@ -471,26 +492,16 @@ def _process_sample(model, sample, output_folder, step):
     out_ref_cam_path = output_folder2 + ('/%s.txt' % name)
 
     if args.display:
-        size1 = len(depth_est)
-        size2 = len(depth_est[1])
-        e = np.ones((size1, size2), dtype=np.float32)
-        out_init_depth_image = e * 36000 - depth_est
-        # Normalize and convert to BGR color images using the shared viz utils
         color_depth_map_path = output_folder2 + ('/color/%s_init.png' % name)
         color_prob_map_path = output_folder2 + ('/color/%s_prob.png' % name)
-
-        # replace inf with nan so viz_utils ignores them
-        out_init_depth_image = np.where(np.isinf(out_init_depth_image), np.nan, out_init_depth_image)
-        # use viz utils to save colored PNGs (depth uses COLORMAP_TURBO)
-        depth_color = depth_to_color(out_init_depth_image)
+        depth_color = depth_to_color(depth_est)
         prob_color = conf_to_color(np.nan_to_num(prob).clip(0, 1))
-        import cv2 as _cv2
-        _cv2.imwrite(color_depth_map_path, depth_color)
-        _cv2.imwrite(color_prob_map_path, prob_color)
+        cv2.imwrite(color_depth_map_path, depth_color)
+        cv2.imwrite(color_prob_map_path, prob_color)
 
     save_pfm(init_depth_map_path, depth_est)
     save_pfm(prob_map_path, prob)
-    plt.imsave(out_ref_image_path, ref_image, format='png')
+    cv2.imwrite(out_ref_image_path, cv2.cvtColor((np.clip(ref_image, 0, 1) * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR))
     write_red_cam(out_ref_cam_path, ref_cam, ref_path)
 
     del outputs, sample_cuda
@@ -501,14 +512,26 @@ def _process_sample(model, sample, output_folder, step):
     return step
 
 
-def _save_test_summary(all_area_metrics, all_area_accumulators):
-    areas_json = {}
+def _save_test_summary(all_area_metrics, all_area_accumulators, all_area_camera_accumulators):
+    per_area = {}
+    per_camera_accum = {}
     overall_accum = DepthMetricAccumulator(align_mode=args.align_mode)
 
     for area_name in sorted(all_area_metrics.keys()):
-        areas_json[area_name] = all_area_metrics[area_name]
+        area_result = all_area_metrics[area_name]
+        area_depth = area_result.get("per_area", {}).get(area_name, {}).get("depth", {})
+        per_area[area_name] = {"depth": area_depth}
         if area_name in all_area_accumulators:
             overall_accum.merge(all_area_accumulators[area_name])
+        if area_name in all_area_camera_accumulators:
+            for cam_key, cam_acc in all_area_camera_accumulators[area_name].items():
+                if cam_key not in per_camera_accum:
+                    per_camera_accum[cam_key] = DepthMetricAccumulator(align_mode=args.align_mode)
+                per_camera_accum[cam_key].merge(cam_acc)
+
+    per_camera = {}
+    for cam_key in sorted(per_camera_accum.keys()):
+        per_camera[cam_key] = {"depth": per_camera_accum[cam_key].finalize()}
 
     overall_metrics = overall_accum.finalize()
 
@@ -516,10 +539,12 @@ def _save_test_summary(all_area_metrics, all_area_accumulators):
         "model_name": "adamvs",
         "split": "test",
         "dataset_path": args.dataset_path,
+        "camera_ids": sorted([key.replace("cam", "") for key in per_camera.keys()]),
         "camera_id": "all",
         "align_mode": args.align_mode,
-        "areas": areas_json,
-        "overall": overall_metrics,
+        "per_camera": per_camera,
+        "per_area": per_area,
+        "overall": {"depth": overall_metrics},
     }
 
     area_names_str = "_".join(sorted(all_area_metrics.keys()))
@@ -536,7 +561,7 @@ def _save_test_summary(all_area_metrics, all_area_accumulators):
     print(f"{'':>8} | " + " | ".join(f"{h:>{col_width}}" for h in headers))
     print("-" * (10 + len(headers) * (col_width + 3)))
     for area_name in sorted(all_area_metrics.keys()):
-        area_metrics = all_area_metrics[area_name]
+        area_metrics = all_area_metrics[area_name]["overall"]["depth"]
         values = " | ".join(f"{area_metrics.get(h, 0):>{col_width}.6f}" for h in headers)
         print(f"{area_name:>8} | {values}")
     print("-" * (10 + len(headers) * (col_width + 3)))

@@ -35,7 +35,7 @@ def _resolve_to_repo_path(path_value: str) -> str:
 
 
 from running.utils.config_utils import load_config
-from models.vggt.utils.load_fn import load_and_preprocess_images
+from models.vggt.utils.load_fn import load_and_preprocess_images_square
 from models.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from models.pi3.utils.basic import load_images_as_tensor_pi_long
 from models.mapanything.utils.image import load_images
@@ -103,6 +103,8 @@ class FF3DR:
         self.predictions_aligned_dir = os.path.join(self.output_path, "tmp_predictions_aligned")
         self.predictions_unaligned_dir = os.path.join(self.output_path, "tmp_predictions_unaligned")
         self.enable_viz = bool(getattr(args, "enable_viz", False))
+        self.process_res = int(getattr(args, "process_res", 518))
+        self.process_res_method = str(getattr(args, "process_res_method", "square"))
         self.viz_dir = os.path.join(self.output_path, "viz")
         for p in [self.output_path, self.predictions_pcd_dir, self.predictions_loop_dir, self.predictions_aligned_dir, self.predictions_unaligned_dir]:
             os.makedirs(p, exist_ok=True)
@@ -577,9 +579,19 @@ class FF3DR:
         with torch.no_grad():
             if torch.cuda.is_available():
                 with torch.amp.autocast("cuda", dtype=self.dtype):
-                    pred = self.model.inference(chunk_images, ref_view_strategy=ref_view_strategy)
+                    pred = self.model.inference(
+                        chunk_images,
+                        ref_view_strategy=ref_view_strategy,
+                        process_res=self.process_res,
+                        process_res_method=self.process_res_method,
+                    )
             else:
-                pred = self.model.inference(chunk_images, ref_view_strategy=ref_view_strategy)
+                pred = self.model.inference(
+                    chunk_images,
+                    ref_view_strategy=ref_view_strategy,
+                    process_res=self.process_res,
+                    process_res_method=self.process_res_method,
+                )
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return {
@@ -740,7 +752,11 @@ class FF3DR:
         }
 
     def _infer_pi3(self, chunk_images):
-        images = load_images_as_tensor_pi_long(chunk_images).to(self.device)
+        images = load_images_as_tensor_pi_long(
+            chunk_images,
+            target_size=self.process_res,
+            process_res_method=self.process_res_method,
+        ).to(self.device)
         with torch.no_grad():
             if torch.cuda.is_available():
                 with torch.amp.autocast("cuda", dtype=self.dtype):
@@ -771,7 +787,7 @@ class FF3DR:
         }
 
     def _infer_vggt(self, chunk_images):
-        images = load_and_preprocess_images(chunk_images).to(self.device)
+        images = load_and_preprocess_images_square(chunk_images, target_size=self.process_res).to(self.device)
         with torch.no_grad():
             if torch.cuda.is_available():
                 with torch.amp.autocast("cuda", dtype=self.dtype):
@@ -793,7 +809,7 @@ class FF3DR:
         }
 
     def _infer_mapanything(self, chunk_images):
-        views = load_images(chunk_images)
+        views = load_images(chunk_images, resize_mode="square", size=self.process_res)
         with torch.no_grad():
             pred_list = self.model.infer(
                 views,
@@ -1422,6 +1438,18 @@ def _build_parser(run_defaults):
         action="store_true",
         default=bool(run_defaults.get("enable_viz", False)),
         help="Save per-frame visualization (depth/conf/rgb/overlay) under <output>/viz/",
+    )
+    parser.add_argument(
+        "--process_res",
+        type=int,
+        default=int(run_defaults.get("process_res", 518)),
+        help="Shared preprocessing resolution for all backends.",
+    )
+    parser.add_argument(
+        "--process_res_method",
+        type=str,
+        default=run_defaults.get("process_res_method", "square"),
+        help="Shared preprocessing method for all backends.",
     )
     return parser
 

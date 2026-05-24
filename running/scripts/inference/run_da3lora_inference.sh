@@ -11,14 +11,14 @@
 #   EVAL_RECON      : true/false (是否计算重建指标)
 #   GPU_ID          : CUDA visible device id
 
-SPLIT="test"
+SPLIT="predict"
 MODEL="depthanything3"
-LORA_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/da3_large_lora_whuomvs/checkpoints/epoch_025.pt"
+LORA_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/train_lora_da3/da3_large_lora_whuomvs_0521/checkpoints/epoch_025.pt"
 AREAS="area2 area3"
 EVAL_DSM=true
 EVAL_NORMAL=false
 EVAL_RECON=false
-GPU_ID=6
+GPU_ID=5
 
 VIEW_NUM=5
 BATCH_SIZE=8

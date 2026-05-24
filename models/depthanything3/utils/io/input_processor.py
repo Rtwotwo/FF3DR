@@ -42,7 +42,8 @@ class InputProcessor:
 
     Pipeline:
       1) Load image and convert to RGB
-      2) Boundary resize (upper/lower bound, preserving aspect ratio)
+        2) Boundary resize (upper/lower bound, preserving aspect ratio)
+            or square resize for the unified inference entry
       3) Enforce divisibility by PATCH_SIZE:
          - "*resize" methods: each dimension is rounded to nearest multiple
            (may up/downscale a few px)
@@ -231,13 +232,20 @@ class InputProcessor:
         pil_img = self._load_image(img)
         orig_w, orig_h = pil_img.size
 
-        # Boundary resize
-        pil_img = self._resize_image(pil_img, process_res, process_res_method)
-        w, h = pil_img.size
-        intrinsic = self._resize_ixt(intrinsic, orig_w, orig_h, w, h)
+        # Boundary resize or unified square resize
+        if process_res_method == "square":
+            pil_img = self._resize_square_image(pil_img, process_res)
+            w, h = pil_img.size
+            intrinsic = self._resize_ixt(intrinsic, orig_w, orig_h, w, h)
+        else:
+            pil_img = self._resize_image(pil_img, process_res, process_res_method)
+            w, h = pil_img.size
+            intrinsic = self._resize_ixt(intrinsic, orig_w, orig_h, w, h)
 
         # Enforce divisibility by PATCH_SIZE
-        if process_res_method.endswith("resize"):
+        if process_res_method == "square":
+            pass
+        elif process_res_method.endswith("resize"):
             pil_img = self._make_divisible_by_resize(pil_img, self.PATCH_SIZE)
             new_w, new_h = pil_img.size
             intrinsic = self._resize_ixt(intrinsic, w, h, new_w, new_h)
@@ -257,6 +265,15 @@ class InputProcessor:
 
         # Return: (img_tensor, (H, W), intrinsic, extrinsic)
         return img_tensor, (H, W), intrinsic, extrinsic
+
+    def _resize_square_image(self, img: Image.Image, target_size: int) -> Image.Image:
+        w, h = img.size
+        max_dim = max(w, h)
+        left = (max_dim - w) // 2
+        top = (max_dim - h) // 2
+        square_img = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
+        square_img.paste(img, (left, top))
+        return square_img.resize((target_size, target_size), Image.Resampling.BICUBIC)
 
     # -----------------------------
     # Intrinsics transforms

@@ -83,7 +83,7 @@ def load_images_as_tensor(path='data/truck', interval=1, PIXEL_LIMIT=255000):
     return torch.stack(tensor_list, dim=0)
 
 
-def load_images_as_tensor_pi_long(image_paths, PIXEL_LIMIT=255000):
+def load_images_as_tensor_pi_long(image_paths, PIXEL_LIMIT=255000, target_size=None, process_res_method="square"):
     """
     Loads images from a list of file paths, resizes them to a uniform size,
     then converts and stacks them into a single [N, 3, H, W] PyTorch tensor.
@@ -104,19 +104,23 @@ def load_images_as_tensor_pi_long(image_paths, PIXEL_LIMIT=255000):
 
     print(f"Found {len(sources)} images. Processing...")
 
-    # --- 2. Determine a uniform target size for all images based on the first image ---
-    first_img = sources[0]
-    W_orig, H_orig = first_img.size
-    scale = math.sqrt(PIXEL_LIMIT / (W_orig * H_orig)) if W_orig * H_orig > 0 else 1
-    W_target, H_target = W_orig * scale, H_orig * scale
-    k, m = round(W_target / 14), round(H_target / 14)
-    while (k * 14) * (m * 14) > PIXEL_LIMIT:
-        if k / m > W_target / H_target:
-            k -= 1
-        else:
-            m -= 1
-    TARGET_W, TARGET_H = max(1, k) * 14, max(1, m) * 14
-    print(f"All images will be resized to a uniform size: ({TARGET_W}, {TARGET_H})")
+    # --- 2. Determine a uniform target size for all images ---
+    if target_size is not None:
+        TARGET_W = TARGET_H = int(target_size)
+        print(f"All images will be resized to a uniform square size: ({TARGET_W}, {TARGET_H})")
+    else:
+        first_img = sources[0]
+        W_orig, H_orig = first_img.size
+        scale = math.sqrt(PIXEL_LIMIT / (W_orig * H_orig)) if W_orig * H_orig > 0 else 1
+        W_target, H_target = W_orig * scale, H_orig * scale
+        k, m = round(W_target / 14), round(H_target / 14)
+        while (k * 14) * (m * 14) > PIXEL_LIMIT:
+            if k / m > W_target / H_target:
+                k -= 1
+            else:
+                m -= 1
+        TARGET_W, TARGET_H = max(1, k) * 14, max(1, m) * 14
+        print(f"All images will be resized to a uniform size: ({TARGET_W}, {TARGET_H})")
 
     # --- 3. Resize images and convert them to tensors in the [0, 1] range ---
     tensor_list = []

@@ -287,6 +287,15 @@ class DualDPT(nn.Module):
             out["metric_log_scale"] = metric_log_scale
         if metric_shift is not None:
             out["metric_shift"] = metric_shift
+        if metric_residual is not None or metric_log_scale is not None or metric_shift is not None:
+            metric_depth = main_pred.squeeze(-1)
+            if metric_log_scale is not None:
+                metric_depth = metric_depth * torch.exp(metric_log_scale.float().view(-1, 1, 1))
+            if metric_shift is not None:
+                metric_depth = metric_depth + metric_shift.float().view(-1, 1, 1)
+            if metric_residual is not None:
+                metric_depth = metric_depth + metric_residual.float()
+            out["metric_depth"] = metric_depth
         return out
 
     # -------------------------------------------------------------------------

@@ -13,4 +13,6 @@ RunArgs:
   da3_group_frames: 8
   da3_group_overlap: 2
   anchor_cam_index: 2
+  process_res: 518
+  process_res_method: square
   device: cuda

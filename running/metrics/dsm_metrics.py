@@ -102,6 +102,7 @@ class DSMGrid:
 
 
 def load_dsm_tif(path: Path) -> DSMGrid:
+    path = Path(path)
     with open(path, "rb") as f:
         byte_order = f.read(2)
         little = byte_order == b"II"

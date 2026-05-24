@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 
 import struct
 import sys
@@ -282,7 +283,7 @@ class PredictMetricInfer:
       - mean angular error, median angular error
     """
 
-    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None, split="predict", areas=None):
+    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None, adamvs_ckpt=None, adamvs_test_max_samples_per_camera=20, split="predict", areas=None):
         self.cfg = cfg
         self.dataset_path = Path(dataset_path)
         self.split = split
@@ -303,6 +304,8 @@ class PredictMetricInfer:
         self.recon_threshold = float(recon_threshold)
         self.recon_stride = int(recon_stride)
         self.lora_checkpoint = lora_checkpoint
+        self.adamvs_ckpt = adamvs_ckpt
+        self.adamvs_test_max_samples_per_camera = int(adamvs_test_max_samples_per_camera)
         self._metric_scale = None
         self._metric_shift = None
         self.model_name = self.cfg["Model"].get("name", self.cfg["Model"].get("model_name", "depthanything3"))
@@ -311,7 +314,11 @@ class PredictMetricInfer:
         else:
             self.dtype = torch.float32
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = self._load_model()
+        if self.model_name == "adamvs":
+            self.model = None
+            logger.info("[INFO] model_name=adamvs, using delegated Ada-MVS inference backend")
+        else:
+            self.model = self._load_model()
 
         self._name_to_params = None
         self._dsm_grid = None
@@ -329,6 +336,21 @@ class PredictMetricInfer:
         if fallback_flat_key is not None and fallback_flat_key in weights:
             return weights[fallback_flat_key]
         raise KeyError("Missing weight config for {}.{} (fallback={})".format(model_key, field, fallback_flat_key))
+
+    def _cfg_get_adamvs_ckpt(self):
+        if self.adamvs_ckpt:
+            return _resolve_path(self.adamvs_ckpt)
+
+        weights = self.cfg.get("Weights", {})
+        if isinstance(weights.get("adamvs"), dict):
+            for key in ("ADAMVS", "CKPT", "CHECKPOINT"):
+                if key in weights["adamvs"]:
+                    return _resolve_path(weights["adamvs"][key])
+        for key in ("ADAMVS", "ADAMVS_CKPT", "ADAMVS_CHECKPOINT"):
+            if key in weights:
+                return _resolve_path(weights[key])
+
+        return str((_REPO_ROOT / "weights" / "adamvs" / "adamvs_whuomvs" / "model_000019_0.1339.ckpt").resolve())
 
     def _load_model(self):
         if self.model_name == "depthanything3":
@@ -369,7 +391,7 @@ class PredictMetricInfer:
             if isinstance(state_dict, dict):
                 model.load_state_dict(state_dict, strict=False)
         else:
-            raise RuntimeError("[ERROR] model_name must be one of depthanything3/mapanything/pi3/vggt")
+            raise RuntimeError("[ERROR] model_name must be one of depthanything3/mapanything/pi3/vggt/adamvs")
         model.eval().to(self.device)
         logger.info("[INFO] Model loaded: %s", self.model_name)
         return model
@@ -963,6 +985,9 @@ class PredictMetricInfer:
         return pred_depth
 
     def run(self):
+        if self.model_name == "adamvs":
+            return self._run_adamvs_via_legacy()
+
         per_camera_results = {}
         per_area_results = {}
         area_accumulators = {}
@@ -1288,6 +1313,67 @@ class PredictMetricInfer:
             "overall": overall_result,
         }
 
+    def _run_adamvs_via_legacy(self):
+        legacy_script = _REPO_ROOT / "running" / "inference" / "run_whuomvs_adamvs_predict.py"
+        output_folder = _REPO_ROOT / "exp" / "whu-omvs" / "metric_adamvs_unified_{}".format(self.split)
+        output_folder.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            sys.executable,
+            str(legacy_script),
+            "--model", "adamvs",
+            "--dataset", "{}_oblique".format(self.split),
+            "--output_folder", str(output_folder),
+            "--loadckpt", self._cfg_get_adamvs_ckpt(),
+            "--dataset_path", str(self.dataset_path),
+            "--split", self.split,
+            "--view_num", "5",
+            "--numdepth", "192",
+            "--max_w", "3712",
+            "--max_h", "5504",
+            "--resize_scale", "0.5",
+            "--batch_size", str(self.batch_size),
+            "--ndepths", "48,32,8",
+            "--depth_inter_r", "4,2,1",
+            "--cr_base_chs", "8,8,8",
+            "--display", "false",
+            "--eval_metrics",
+            "--test_max_samples_per_camera", str(self.adamvs_test_max_samples_per_camera),
+            "--align_mode", self.align_mode,
+            "--outlier_threshold", str(self.outlier_threshold),
+        ]
+        if self.split == "test":
+            resolved_areas = self._resolve_areas()
+            if resolved_areas:
+                cmd += ["--areas", *resolved_areas]
+
+        logger.info("[INFO] Delegating Adamvs inference: %s", " ".join(cmd))
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError("[ERROR] Delegated Ada-MVS inference failed with code {}".format(exc.returncode)) from exc
+
+        if self.split == "test":
+            resolved_areas = self._resolve_areas()
+            metrics_file = output_folder / "test_{}_all_adamvs_metrics.json".format("_".join(sorted(resolved_areas)))
+            if not metrics_file.exists():
+                candidates = sorted(output_folder.glob("test_*_all_adamvs_metrics.json"))
+                if not candidates:
+                    raise FileNotFoundError("[ERROR] No test summary metrics file found under {}".format(output_folder))
+                metrics_file = candidates[-1]
+        else:
+            metrics_file = output_folder / "adamvs_metrics.json"
+
+        if not metrics_file.exists():
+            raise FileNotFoundError("[ERROR] Metrics file not found after Ada-MVS delegation: {}".format(metrics_file))
+
+        with open(metrics_file, "r", encoding="utf-8") as fh:
+            results = json.load(fh)
+        results["model_name"] = "adamvs"
+        results["align_mode"] = self.align_mode
+        results["outlier_threshold"] = self.outlier_threshold
+        return results
+
     def _save_adamvs_format(
         self,
         pred_depth: np.ndarray,
@@ -1385,9 +1471,11 @@ def _print_results(results):
 
     ada_mvs_headers = ["MAE", "RMSE", "PAG_0.2m", "PAG_0.4m", "PAG_0.6m"]
     standard_headers = ["abs_rel", "sq_rel", "rmse_log", "log10", "silog", "delta1", "delta2", "delta3"]
+    split_name = str(results.get("split", "predict")).capitalize()
+    has_dsm_metrics = any(key in overall for key in ("dsm_grid_vs_gt_file", "dsm_grid", "dsm_pixel"))
 
     print("=" * 120)
-    print("WHU-OMVS Predict Split Benchmark Metrics (Ada-MVS / Liu et al. 2023)")
+    print(f"WHU-OMVS {split_name} Metrics (Ada-MVS / Liu et al. 2023)")
     print("=" * 120)
     print(
         "model={} cameras={} align={} outlier_T={}m".format(
@@ -1396,6 +1484,11 @@ def _print_results(results):
         )
     )
     print()
+
+    if not has_dsm_metrics:
+        print("[INFO] This result set contains depth metrics only; DSM-grid MAE/PAG are not available for this split/path.")
+        print("[INFO] If you need Ada-MVS paper-style MAE/PAG, use a path that produces DSM-grid metrics.")
+        print()
 
     if "dsm_grid_vs_gt_file" in overall:
         dsm = overall["dsm_grid_vs_gt_file"]
@@ -1438,17 +1531,12 @@ def _print_results(results):
 
     print("--- Depth-Level Metrics (Raw Depth Map Comparison, for reference only) ---")
     print("  WARNING: These metrics compare raw depth values (528-914m range).")
-    print("  PAG values here are NOT meaningful for the Ada-MVS paper benchmark.")
-    print("  Use DSM Grid metrics above for paper comparison.")
+    print("  Use DSM Grid metrics above for paper comparison when they are available.")
     print()
-    print("  " + " | ".join("{:>12}".format(h) for h in ada_mvs_headers))
-    print("  " + " | ".join("{:>12}".format(_format_metric(depth[h])) for h in ada_mvs_headers))
-    print("  valid_pixels={} outlier_pixels={}".format(depth["valid_count"], depth.get("outlier_count", "N/A")))
-    print()
-
     print("--- Standard Depth Metrics (for cross-benchmark comparison) ---")
     print("  " + " | ".join("{:>12}".format(h) for h in standard_headers))
     print("  " + " | ".join("{:>12}".format(_format_metric(depth[h])) for h in standard_headers))
+    print("  valid_pixels={} outlier_pixels={}".format(depth["valid_count"], depth.get("outlier_count", "N/A")))
     print("-" * 120)
 
     if "normal" in overall:
@@ -1493,7 +1581,6 @@ def _print_results(results):
         for area_name, area_result in sorted(per_area.items()):
             area_depth = area_result["depth"]
             print("  {}:".format(area_name))
-            print("    Ada-MVS:   " + " | ".join("{:>12}".format(_format_metric(area_depth[h])) for h in ada_mvs_headers))
             print("    Standard:  " + " | ".join("{:>12}".format(_format_metric(area_depth[h])) for h in standard_headers))
         print("-" * 120)
 
@@ -1507,7 +1594,6 @@ def _print_results(results):
         if "dsm_pixel" in cam_result:
             cam_dsm = cam_result["dsm_pixel"]
             print("    DSM Pixel: " + " | ".join("{:>12}".format(_format_metric(cam_dsm[h])) for h in ada_mvs_headers))
-        print("    Depth:     " + " | ".join("{:>12}".format(_format_metric(cam_depth[h])) for h in ada_mvs_headers))
         print("    Standard:  " + " | ".join("{:>12}".format(_format_metric(cam_depth[h])) for h in standard_headers))
         if "normal" in cam_result:
             cn = cam_result["normal"]
@@ -1623,8 +1709,20 @@ def parse_args():
         "--model_name",
         type=str,
         default=None,
-        choices=["depthanything3", "mapanything", "pi3", "vggt"],
+        choices=["depthanything3", "mapanything", "pi3", "vggt", "adamvs"],
         help="Model name override. If provided, it supersedes Model.name in config.",
+    )
+    parser.add_argument(
+        "--adamvs_ckpt",
+        type=str,
+        default=None,
+        help="Optional Ada-MVS checkpoint path. If omitted, resolve from config Weights or built-in default.",
+    )
+    parser.add_argument(
+        "--adamvs_test_max_samples_per_camera",
+        type=int,
+        default=20,
+        help="Max Ada-MVS test samples to keep per camera when delegating to the legacy predictor. Set <=0 to disable.",
     )
     parser.add_argument(
         "--save_adamvs_format",
@@ -1714,6 +1812,8 @@ def main():
         recon_threshold=args.recon_threshold,
         recon_stride=args.recon_stride,
         lora_checkpoint=args.lora_checkpoint,
+        adamvs_ckpt=args.adamvs_ckpt,
+        adamvs_test_max_samples_per_camera=args.adamvs_test_max_samples_per_camera,
         split=split,
         areas=args.areas,
     )
