@@ -1,32 +1,33 @@
 import cv2
 import numpy as np
 from pathlib import Path
+import matplotlib.cm as cm
 
 
 def depth_to_color(depth_map, vmin=None, vmax=None, cmap=cv2.COLORMAP_TURBO):
     """Convert a single-channel depth map to an 8-bit BGR color image.
 
     - depth_map: numpy array (H,W) float. May contain NaN/Inf for invalid pixels.
-    - vmin/vmax: if None, computed from finite values in depth_map.
-    - cmap: OpenCV colormap id (default: COLORMAP_TURBO).
+    - vmin/vmax: if None, computed from valid positive values in depth_map.
+    - cmap: OpenCV colormap id kept for compatibility; viridis is used by default.
     Returns uint8 BGR image.
     """
     if depth_map is None:
         return None
     depth = np.asarray(depth_map, dtype=np.float32)
     h, w = depth.shape[:2]
-    valid = np.isfinite(depth)
+    valid = np.isfinite(depth) & (depth > 0)
     if not np.any(valid):
         return np.zeros((h, w, 3), dtype=np.uint8)
     if vmin is None:
-        vmin = float(np.min(depth[valid]))
+        vmin = float(depth[valid].min())
     if vmax is None:
-        vmax = float(np.max(depth[valid]))
+        vmax = float(depth[valid].max())
     if vmax - vmin < 1e-8:
         vmax = vmin + 1.0
     norm = np.clip((depth - vmin) / (vmax - vmin), 0.0, 1.0)
-    norm_uint8 = (norm * 255.0).astype(np.uint8)
-    color = cv2.applyColorMap(norm_uint8, cmap)
+    color_rgb = cm.viridis(norm)[:, :, :3]
+    color = (color_rgb[:, :, ::-1] * 255.0).astype(np.uint8)
     # set invalid pixels to black
     color[~valid] = 0
     return color

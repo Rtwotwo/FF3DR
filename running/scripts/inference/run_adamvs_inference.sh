@@ -15,7 +15,7 @@ LOADCKPT="/data2/dataset/Redal/work_feedforward_3drepo/weights/adamvs/adamvs_whu
 AREAS="area2 area3"
 EVAL_METRICS=true
 DISPLAY_VIZ=true
-GPU_ID=5
+GPU_ID=3
 TEST_MAX_SAMPLES_PER_CAMERA=-1
 ADAMVS_TEST_MAX_SAMPLES_PER_CAMERA=20
 ALIGN_MODE="median"
@@ -35,15 +35,19 @@ CR_BASE_CHS="8,8,8"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
+# Always enable visualization and metrics; control per-split behavior below
+DISPLAY_VIZ=true
+EVAL_METRICS=true
 if [[ "${SPLIT}" == "test" ]]; then
-    DISPLAY_VIZ=true
     DATASET_PATH="${PROJECT_ROOT}/dataset/WHU-OMVS/test"
     OUTPUT_FOLDER="${PROJECT_ROOT}/exp/whu-omvs/metric_adamvs_whuomvs_test/"
+    # keep only first 50 samples per camera for test visualization
+    ADAMVS_TEST_MAX_SAMPLES_PER_CAMERA=50
 else
-    DISPLAY_VIZ=false
-    EVAL_METRICS=false
     DATASET_PATH="${PROJECT_ROOT}/dataset/WHU-OMVS/predict"
     OUTPUT_FOLDER="${PROJECT_ROOT}/exp/whu-omvs/metric_adamvs_whuomvs_predict/"
+    # predict: save all samples for visualization
+    ADAMVS_TEST_MAX_SAMPLES_PER_CAMERA=-1
 fi
 
 echo "============================================"
@@ -84,6 +88,7 @@ ARGS=(
     --align_mode "${ALIGN_MODE}"
     --outlier_threshold "${OUTLIER_THRESHOLD}"
     --adamvs_test_max_samples_per_camera "${ADAMVS_TEST_MAX_SAMPLES_PER_CAMERA}"
+    --save_adamvs_format
     --no_eval_dsm
 )
 
@@ -106,4 +111,45 @@ if [[ "${SPLIT}" == "test" && "${EVAL_METRICS}" == "true" ]]; then
     echo "[INFO] Metrics files location:"
     echo "  Per-area:   ${OUTPUT_FOLDER}/{area_name}/adamvs_metrics.json"
     echo "  Combined:   ${OUTPUT_FOLDER}/test_*_all_adamvs_metrics.json"
+fi
+
+# Post-process Ada-MVS PFMs into colored depth PNGs for easier visualization
+if [[ "${DISPLAY_VIZ}" == "true" ]]; then
+    ADAMVS_OUT_DIR="${OUTPUT_FOLDER}/adamvs_output"
+    VIZ_OUT_DIR="${OUTPUT_FOLDER}/viz/depth_pngs"
+    echo "[INFO] Converting PFMs in ${ADAMVS_OUT_DIR} -> ${VIZ_OUT_DIR}"
+    python3 - <<PY
+import os
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path("${PROJECT_ROOT}").resolve()))
+from running.training.datasets_adamvs.data_io import read_pfm
+from running.utils.viz_utils import depth_to_color
+import cv2
+
+in_dir = Path("${ADAMVS_OUT_DIR}")
+out_dir = Path("${VIZ_OUT_DIR}")
+if not in_dir.exists():
+    print(f"[WARN] Ada-MVS output dir not found: {in_dir}")
+    raise SystemExit(0)
+for root, _, files in os.walk(in_dir):
+    for fn in files:
+        if fn.endswith('.pfm'):
+            src = Path(root) / fn
+            rel = src.relative_to(in_dir)
+            dst_dir = out_dir / rel.parent
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                depth, _ = read_pfm(str(src))
+            except Exception as e:
+                print(f"[WARN] failed read_pfm {src}: {e}")
+                continue
+            # depth may be color or single channel; if color, take first channel
+            if depth.ndim == 3:
+                depth = depth[..., 0]
+            color = depth_to_color(depth)
+            out_path = dst_dir / (src.stem + '.png')
+            cv2.imwrite(str(out_path), color)
+print('[INFO] PFMs converted to PNGs')
+PY
 fi

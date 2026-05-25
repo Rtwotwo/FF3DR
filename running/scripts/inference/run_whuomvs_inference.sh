@@ -12,11 +12,22 @@
 TRAIN_TEST_SPLIT="predict"
 MODEL_NAMES=("depthanything3" 'mapanything' 'pi3' 'vggt')
 CAMERA_IDS=(1 2 3 4 5)
-CHUNK_SIZE=50
-OVERLAP=25
-GPU_ID=5
+CHUNK_SIZE=30
+OVERLAP=15
+GPU_ID=3
 PROCESS_RES=518
 PROCESS_RES_METHOD="square"
+
+if [[ "${TRAIN_TEST_SPLIT}" == "predict" ]]; then
+    ENABLE_VIZ=1
+    VIZ_MAX_FRAMES=-1
+elif [[ "${TRAIN_TEST_SPLIT}" == "test" ]]; then
+    ENABLE_VIZ=1
+    VIZ_MAX_FRAMES=50
+else
+    ENABLE_VIZ=0
+    VIZ_MAX_FRAMES=-1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INFERENCE_SCRIPT="${SCRIPT_DIR}/../../inference/run_whuomvs_inference.py"
@@ -28,6 +39,7 @@ echo " Model: ${MODEL_NAMES}"
 echo " Cameras: ${CAMERA_IDS[*]}"
 echo " Chunk: ${CHUNK_SIZE}, Overlap: ${OVERLAP}"
 echo " Resize: ${PROCESS_RES} (${PROCESS_RES_METHOD})"
+echo " Viz: ${ENABLE_VIZ}, viz_max_frames=${VIZ_MAX_FRAMES}"
 echo " GPU: ${GPU_ID}"
 echo "=============================================="
 
@@ -46,7 +58,8 @@ for MODEL_NAME in "${MODEL_NAMES[@]}"; do
             --overlap ${OVERLAP} \
             --process_res ${PROCESS_RES} \
             --process_res_method "${PROCESS_RES_METHOD}" \
-            --enable_viz
+            --viz_max_frames ${VIZ_MAX_FRAMES} \
+            $(if [[ "${ENABLE_VIZ}" -eq 1 ]]; then echo "--enable_viz"; fi)
         echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Done: came${CAME_ID}"
     done
     echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] All done."

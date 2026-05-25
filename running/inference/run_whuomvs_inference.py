@@ -103,6 +103,10 @@ class FF3DR:
         self.predictions_aligned_dir = os.path.join(self.output_path, "tmp_predictions_aligned")
         self.predictions_unaligned_dir = os.path.join(self.output_path, "tmp_predictions_unaligned")
         self.enable_viz = bool(getattr(args, "enable_viz", False))
+        self.viz_max_frames = int(getattr(args, "viz_max_frames", -1))
+        self.viz_depth_vmin = getattr(args, "viz_depth_vmin", None)
+        self.viz_depth_vmax = getattr(args, "viz_depth_vmax", None)
+        self.lora_checkpoint = getattr(args, "lora_checkpoint", None)
         self.process_res = int(getattr(args, "process_res", 518))
         self.process_res_method = str(getattr(args, "process_res_method", "square"))
         self.viz_dir = os.path.join(self.output_path, "viz")
@@ -232,6 +236,8 @@ class FF3DR:
             model = DepthAnything3(**da3_config)
             state_dict = load_file(da3_weight_path)
             model.load_state_dict(state_dict, strict=False)
+            if getattr(self, "lora_checkpoint", None) is not None:
+                model = self._apply_lora_to_da3(model)
         elif self.model_name == "mapanything":
             try:
                 with open(self.config["Weights"]["mapanything"]["MAP_CONFIG"], "r") as f:
@@ -263,12 +269,79 @@ class FF3DR:
         logger.info("[INFO] Model loaded: %s", self.model_name)
         return model
 
+    def _apply_lora_to_da3(self, model):
+        from peft import LoraConfig, get_peft_model
+        try:
+            from da3.model.metric_adapter import MetricAdapterV3
+        except Exception:
+            MetricAdapterV3 = None
+
+        ckpt = torch.load(self.lora_checkpoint, map_location="cpu", weights_only=False)
+        ckpt_args = ckpt.get("args", {})
+        lora_rank = ckpt_args.get("lora_rank", 16)
+        lora_alpha = ckpt_args.get("lora_alpha", 32)
+        lora_dropout = ckpt_args.get("lora_dropout", 0.05)
+        lora_target_modules = ckpt_args.get("lora_target_modules", ["qkv", "proj"])
+        adapter_hidden_dim = ckpt_args.get("adapter_hidden_dim", 64)
+        adapter_depth_norm = ckpt_args.get("adapter_depth_norm", 600.0)
+
+        logger.info("[INFO] Applying LoRA: rank=%d alpha=%d dropout=%.3f targets=%s",
+                    lora_rank, lora_alpha, lora_dropout, lora_target_modules)
+
+        lora_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_alpha,
+            target_modules=lora_target_modules,
+            lora_dropout=lora_dropout,
+            bias="none",
+        )
+        model.model = get_peft_model(model.model, lora_config)
+
+        if MetricAdapterV3 is not None and hasattr(model.model.base_model.model, "head"):
+            head = model.model.base_model.model.head
+            if hasattr(head, "metric_adapter"):
+                feat_dim = head.metric_adapter.residual_conv1.in_channels - 1
+                logger.info("[INFO] Replacing MetricAdapter: feat_dim=%d hidden_dim=%d depth_norm=%.1f",
+                             feat_dim, adapter_hidden_dim, adapter_depth_norm)
+                head.metric_adapter = MetricAdapterV3(
+                    feat_dim=feat_dim,
+                    hidden_dim=adapter_hidden_dim,
+                    depth_norm=adapter_depth_norm,
+                )
+
+        model_sd = ckpt["model_state_dict"]
+        da3_sd = {}
+        for k, v in model_sd.items():
+            if k.startswith("da3."):
+                da3_sd[k[len("da3."):]] = v
+            elif k.startswith("scale_shift."):
+                pass
+            else:
+                da3_sd[k] = v
+
+        missing, unexpected = model.load_state_dict(da3_sd, strict=False)
+        if missing:
+            logger.warning("[WARN] Missing keys when loading LoRA checkpoint (%d): %s", len(missing), missing[:5])
+        if unexpected:
+            logger.warning("[WARN] Unexpected keys when loading LoRA checkpoint (%d): %s", len(unexpected), unexpected[:5])
+
+        logger.info("[INFO] LoRA checkpoint applied: %s", self.lora_checkpoint)
+        return model
+
     def _ensure_batch(self, arr, kind):
         if arr is None:
             return None
         arr = np.asarray(arr)
         if kind in ["depth", "conf"] and arr.ndim == 2:
             return arr[None, ...]
+        if kind == "image_coords":
+            if arr.ndim == 1:
+                return arr[None, ...]
+            if arr.ndim == 2 and arr.shape[0] != 1:
+                return arr
+            if arr.ndim == 3 and arr.shape[0] == 1:
+                return arr[0]
+            return arr
         if kind == "images" and arr.ndim == 3 and arr.shape[-1] == 3:
             return arr[None, ...]
         if kind == "intrinsics" and arr.ndim == 2:
@@ -302,6 +375,7 @@ class FF3DR:
             extrinsics = pred.get("extrinsics", pred.get("extrinsic", None))
             images = pred.get("processed_images", pred.get("images", None))
             world_points = pred.get("world_points", None)
+            image_coords = pred.get("image_coords", None)
         else:
             depth = getattr(pred, "depth", None)
             conf = getattr(pred, "conf", None)
@@ -309,6 +383,7 @@ class FF3DR:
             extrinsics = getattr(pred, "extrinsics", None)
             images = getattr(pred, "processed_images", getattr(pred, "images", None))
             world_points = getattr(pred, "world_points", None)
+            image_coords = getattr(pred, "image_coords", None)
 
         depth = self._squeeze_leading_batch(depth)
         conf = self._squeeze_leading_batch(conf)
@@ -333,7 +408,8 @@ class FF3DR:
         extrinsics = self._ensure_batch(extrinsics, "extrinsics")
         images = self._ensure_batch(images, "images")
         world_points = self._ensure_batch(world_points, "world_points")
-        return depth, conf, intrinsics, extrinsics, images, world_points
+        image_coords = self._ensure_batch(image_coords, "image_coords") if image_coords is not None else None
+        return depth, conf, intrinsics, extrinsics, images, world_points, image_coords
 
     def _build_chunk_images(self, range_1, range_2=None):
         # Keep frame-major order to ensure one frame includes all cameras.
@@ -787,7 +863,14 @@ class FF3DR:
         }
 
     def _infer_vggt(self, chunk_images):
-        images = load_and_preprocess_images_square(chunk_images, target_size=self.process_res).to(self.device)
+        images_out = load_and_preprocess_images_square(chunk_images, target_size=self.process_res)
+        if isinstance(images_out, (tuple, list)):
+            images = images_out[0]
+            image_coords = images_out[1] if len(images_out) > 1 else None
+        else:
+            images = images_out
+            image_coords = None
+        images = images.to(self.device)
         with torch.no_grad():
             if torch.cuda.is_available():
                 with torch.amp.autocast("cuda", dtype=self.dtype):
@@ -806,6 +889,7 @@ class FF3DR:
             "extrinsics": self._to_numpy(extrinsics),
             "processed_images": self._to_numpy(processed.to(torch.uint8)),
             "world_points": self._to_numpy(pred.get("world_points", None)),
+            "image_coords": self._to_numpy(image_coords),
         }
 
     def _infer_mapanything(self, chunk_images):
@@ -950,7 +1034,7 @@ class FF3DR:
         return s, R, t, float(mean_error)
 
     def _chunk_to_point_arrays(self, pred):
-        depth, conf, intrinsics, extrinsics, images, world_points = self._get_prediction_arrays(pred)
+        depth, conf, intrinsics, extrinsics, images, world_points, image_coords = self._get_prediction_arrays(pred)
         if conf is None:
             raise RuntimeError("[ERROR] Missing confidence map in prediction")
         if world_points is None:
@@ -966,22 +1050,109 @@ class FF3DR:
                 images = images.clip(0, 255).astype(np.uint8)
         return world_points, conf, images, depth
 
+    @staticmethod
+    def _infer_content_bbox(image):
+        if image is None:
+            return None
+        img = np.asarray(image)
+        if img.ndim == 2:
+            img = img[..., None]
+        if img.ndim != 3 or img.shape[0] < 8 or img.shape[1] < 8:
+            return None
+        if img.dtype != np.uint8:
+            img = np.clip(img, 0.0, 255.0 if float(np.nanmax(img)) > 1.5 else 1.0)
+            if float(np.nanmax(img)) <= 1.5:
+                img = (img * 255.0).astype(np.uint8)
+            else:
+                img = img.astype(np.uint8)
+        corner_patch = np.concatenate([
+            img[:4, :4].reshape(-1, img.shape[-1]),
+            img[:4, -4:].reshape(-1, img.shape[-1]),
+            img[-4:, :4].reshape(-1, img.shape[-1]),
+            img[-4:, -4:].reshape(-1, img.shape[-1]),
+        ], axis=0)
+        pad_color = np.median(corner_patch, axis=0)
+        dist = np.abs(img.astype(np.int16) - pad_color.astype(np.int16)).sum(axis=-1)
+        mask = dist > 18
+        if not np.any(mask):
+            return None
+        ys, xs = np.where(mask)
+        y1, y2 = int(ys.min()), int(ys.max()) + 1
+        x1, x2 = int(xs.min()), int(xs.max()) + 1
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return None
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _crop_to_bbox(arr, bbox):
+        if arr is None or bbox is None:
+            return arr
+        x1, y1, x2, y2 = bbox
+        return arr[y1:y2, x1:x2]
+
+    @staticmethod
+    def _resize_viz_image(image, target_size):
+        if image is None:
+            return None
+        arr = np.asarray(image)
+        if arr.size == 0:
+            return arr
+        if arr.shape[0] == target_size and arr.shape[1] == target_size:
+            return arr
+        return cv2.resize(arr, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
+
     def _save_viz_for_chunk(self, chunk_data, chunk_idx, frame_offset):
         if not self.enable_viz:
             return
-        depth, conf, intrinsics, extrinsics, images, _ = self._get_prediction_arrays(chunk_data)
+        depth, conf, intrinsics, extrinsics, images, _, image_coords = self._get_prediction_arrays(chunk_data)
         if depth is None or conf is None:
             return
         n_views = depth.shape[0]
         cam_names = [os.path.basename(p) for p in self.camera_dirs]
+        viz_target_size = int(getattr(self, "viz_output_size", self.process_res))
 
         if depth.ndim == 4 and depth.shape[-1] == 1:
             depth = depth.squeeze(-1)
         if conf.ndim == 4 and conf.shape[-1] == 1:
             conf = conf.squeeze(-1)
 
-        depth_global_min = float(np.min(depth[np.isfinite(depth)])) if np.any(np.isfinite(depth)) else 0.0
-        depth_global_max = float(np.max(depth[np.isfinite(depth)])) if np.any(np.isfinite(depth)) else 1.0
+        crop_bboxes = []
+        for vi in range(n_views):
+            bbox = None
+            if image_coords is not None:
+                coord = np.asarray(image_coords[vi]).reshape(-1)
+                if coord.size >= 4 and np.all(np.isfinite(coord[:4])):
+                    x1, y1, x2, y2 = coord[:4]
+                    bbox = (
+                        int(np.floor(x1)),
+                        int(np.floor(y1)),
+                        int(np.ceil(x2)),
+                        int(np.ceil(y2)),
+                    )
+            if bbox is None and images is not None:
+                bbox = self._infer_content_bbox(images[vi])
+            crop_bboxes.append(bbox)
+
+        if self.viz_depth_vmin is not None and self.viz_depth_vmax is not None:
+            depth_global_min = float(self.viz_depth_vmin)
+            depth_global_max = float(self.viz_depth_vmax)
+        else:
+            valid_depth_list = []
+            for vi in range(n_views):
+                d = self._crop_to_bbox(depth[vi], crop_bboxes[vi])
+                if d is None:
+                    continue
+                valid = d[np.isfinite(d) & (d > 0)]
+                if valid.size > 0:
+                    valid_depth_list.append(valid)
+
+            valid_depth = np.concatenate(valid_depth_list, axis=0) if len(valid_depth_list) > 0 else np.array([], dtype=np.float32)
+            if valid_depth.size > 0:
+                depth_global_min = float(np.quantile(valid_depth, 0.02))
+                depth_global_max = float(np.quantile(valid_depth, 0.98))
+            else:
+                depth_global_min = 0.0
+                depth_global_max = 1.0
 
         for vi in range(n_views):
             if self.num_cameras > 1:
@@ -993,22 +1164,27 @@ class FF3DR:
                 cam_name = cam_names[0] if len(cam_names) > 0 else "0"
 
             global_frame_idx = frame_offset + frame_local
+            if self.viz_max_frames > 0 and global_frame_idx >= self.viz_max_frames:
+                continue
             stem = "{:06d}".format(global_frame_idx)
 
             cam_viz_dir = os.path.join(self.viz_dir, cam_name)
             os.makedirs(cam_viz_dir, exist_ok=True)
 
-            d = depth[vi]
-            c = conf[vi]
+            bbox = crop_bboxes[vi]
+            d = self._crop_to_bbox(depth[vi], bbox)
+            c = self._crop_to_bbox(conf[vi], bbox)
 
             depth_color = _depth_to_color(d, vmin=depth_global_min, vmax=depth_global_max)
+            depth_color = self._resize_viz_image(depth_color, viz_target_size)
             cv2.imwrite(os.path.join(cam_viz_dir, "{}_depth.png".format(stem)), depth_color)
 
             conf_color = _conf_to_color(c)
+            conf_color = self._resize_viz_image(conf_color, viz_target_size)
             cv2.imwrite(os.path.join(cam_viz_dir, "{}_conf.png".format(stem)), conf_color)
 
             if images is not None:
-                img = images[vi]
+                img = self._crop_to_bbox(images[vi], bbox)
                 if img.ndim == 3 and img.shape[-1] == 3:
                     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 elif img.ndim == 2:
@@ -1016,8 +1192,10 @@ class FF3DR:
                 else:
                     img_bgr = None
                 if img_bgr is not None:
+                    img_bgr = self._resize_viz_image(img_bgr, viz_target_size)
                     cv2.imwrite(os.path.join(cam_viz_dir, "{}_rgb.png".format(stem)), img_bgr)
                     overlay = _overlay_depth_on_rgb(img_bgr, depth_color, alpha=0.5)
+                    overlay = self._resize_viz_image(overlay, viz_target_size)
                     cv2.imwrite(os.path.join(cam_viz_dir, "{}_overlay.png".format(stem)), overlay)
 
         logger.info("[INFO] Saved viz for chunk %d (%d views) to %s", chunk_idx, n_views, self.viz_dir)
@@ -1438,6 +1616,30 @@ def _build_parser(run_defaults):
         action="store_true",
         default=bool(run_defaults.get("enable_viz", False)),
         help="Save per-frame visualization (depth/conf/rgb/overlay) under <output>/viz/",
+    )
+    parser.add_argument(
+        "--viz_max_frames",
+        type=int,
+        default=int(run_defaults.get("viz_max_frames", -1)),
+        help="Maximum number of frame indices to save viz for; -1 means no limit.",
+    )
+    parser.add_argument(
+        "--viz_depth_vmin",
+        type=float,
+        default=run_defaults.get("viz_depth_vmin", None),
+        help="Fixed minimum depth for visualization normalization; None uses per-chunk quantiles.",
+    )
+    parser.add_argument(
+        "--viz_depth_vmax",
+        type=float,
+        default=run_defaults.get("viz_depth_vmax", None),
+        help="Fixed maximum depth for visualization normalization; None uses per-chunk quantiles.",
+    )
+    parser.add_argument(
+        "--lora_checkpoint",
+        type=str,
+        default=run_defaults.get("lora_checkpoint", None),
+        help="Optional LoRA checkpoint to apply to DA3 model for visualization.",
     )
     parser.add_argument(
         "--process_res",

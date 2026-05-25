@@ -147,14 +147,6 @@ from metrics.dsm_metrics import (
 )
 from metrics.pointcloud_recon import PointCloudReconAccumulator, load_ply as load_gt_ply, unproject_depth_to_points, compute_recon_metrics_multi_threshold
 from models.depthanything3.api import DepthAnything3
-from models.mapanything.models.mapanything import MapAnything
-from models.mapanything.utils.image import load_images
-from models.pi3.models.pi3 import Pi3
-from models.pi3.utils.basic import load_images_as_tensor_pi_long
-from models.vggt.models.vggt import VGGT
-from models.vggt.utils.load_fn import load_and_preprocess_images
-from models.vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from uniception.models.utils.transformer_blocks import Mlp
 from running.utils.config_utils import load_config
 
 logger = logging.getLogger(__name__)
@@ -366,6 +358,9 @@ class PredictMetricInfer:
                 model = self._apply_lora_to_da3(model)
 
         elif self.model_name == "mapanything":
+            from models.mapanything.models.mapanything import MapAnything
+            from models.mapanything.utils.image import load_images
+            from uniception.models.utils.transformer_blocks import Mlp
             map_config_path = self._cfg_get_weight("mapanything", "MAP_CONFIG", fallback_flat_key="MAP_CONFIG")
             map_weight_path = self._cfg_get_weight("mapanything", "MAP", fallback_flat_key="MAP")
             with open(map_config_path, "r", encoding="utf-8") as fh:
@@ -379,12 +374,14 @@ class PredictMetricInfer:
             state_dict = load_file(map_weight_path)
             model.load_state_dict(state_dict, strict=False)
         elif self.model_name == "pi3":
+            from models.pi3.models.pi3 import Pi3
             _ = self._cfg_get_weight("pi3", "PI3_CONFIG", fallback_flat_key="PI3_CONFIG")
             pi3_weight_path = self._cfg_get_weight("pi3", "PI3", fallback_flat_key="PI3")
             model = Pi3()
             state_dict = load_file(pi3_weight_path)
             model.load_state_dict(state_dict, strict=False)
         elif self.model_name == "vggt":
+            from models.vggt.models.vggt import VGGT
             vggt_weight_path = self._cfg_get_weight("vggt", "VGGT", fallback_flat_key="VGGT")
             model = VGGT()
             state_dict = torch.load(vggt_weight_path, map_location=self.device)
@@ -669,6 +666,7 @@ class PredictMetricInfer:
         return {"depth": depth, "conf": conf}
 
     def _predict_batch_mapanything(self, image_paths):
+        from models.mapanything.utils.image import load_images
         depth_list = []
         conf_list = []
         for image_path in image_paths:
@@ -726,6 +724,7 @@ class PredictMetricInfer:
         return {"depth": depths, "conf": confs}
 
     def _predict_batch_pi3(self, image_paths):
+        from models.pi3.utils.basic import load_images_as_tensor_pi_long
         depth_list = []
         conf_list = []
         for image_path in image_paths:
@@ -767,6 +766,8 @@ class PredictMetricInfer:
         return {"depth": depths, "conf": confs}
 
     def _predict_batch_vggt(self, image_paths):
+        from models.vggt.utils.load_fn import load_and_preprocess_images
+        from models.vggt.utils.pose_enc import pose_encoding_to_extri_intri
         depth_list = []
         conf_list = []
         for image_path in image_paths:

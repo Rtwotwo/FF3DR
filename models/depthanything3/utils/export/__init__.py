@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from depth_anything_3.specs import Prediction
+from models.depthanything3.specs import Prediction
 
 try:
-    from depth_anything_3.utils.export.gs import export_to_gs_ply, export_to_gs_video
+    from models.depthanything3.utils.export.gs import export_to_gs_ply, export_to_gs_video
 except ImportError:
     export_to_gs_ply = None
     export_to_gs_video = None

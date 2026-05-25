@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -421,6 +422,30 @@ def collect_depth_distribution(
 def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr_value: float) -> None:
     for group in optimizer.param_groups:
         group["lr"] = lr_value
+
+
+def capture_rng_state() -> Dict[str, object]:
+    state = {
+        "python_random_state": random.getstate(),
+        "numpy_random_state": np.random.get_state(),
+        "torch_random_state": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda_random_state"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state: Dict[str, object]) -> None:
+    if not state:
+        return
+    if "python_random_state" in state:
+        random.setstate(state["python_random_state"])
+    if "numpy_random_state" in state:
+        np.random.set_state(state["numpy_random_state"])
+    if "torch_random_state" in state:
+        torch.set_rng_state(state["torch_random_state"])
+    if torch.cuda.is_available() and "torch_cuda_random_state" in state:
+        torch.cuda.set_rng_state_all(state["torch_cuda_random_state"])
 
 
 def apply_lora_to_model(model, lora_rank=16, lora_alpha=32, lora_dropout=0.05, target_modules=None):
@@ -858,15 +883,32 @@ def main():
 
     if args.resume and os.path.exists(args.resume):
         logger.info("Resuming from checkpoint: %s", args.resume)
-        ckpt = torch.load(args.resume, map_location="cpu")
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"], strict=False)
         if "optimizer_state_dict" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         if "global_step" in ckpt:
             global_step = ckpt["global_step"]
+        if "epoch" in ckpt:
+            start_epoch = int(ckpt["epoch"])
         if "best_val_mae" in ckpt:
             best_val_mae = ckpt["best_val_mae"]
-        logger.info("Resumed from global_step=%d, best_val_mae=%.4f", global_step, best_val_mae)
+        if "best_test_mae" in ckpt:
+            best_test_mae = ckpt["best_test_mae"]
+        if "best_ema_val_mae" in ckpt:
+            best_ema_val_mae = ckpt["best_ema_val_mae"]
+        if "ema_val_mae" in ckpt:
+            ema_val_mae = ckpt["ema_val_mae"]
+        if "early_stop_wait" in ckpt:
+            early_stop_wait = int(ckpt["early_stop_wait"])
+        if "rng_state" in ckpt:
+            restore_rng_state(ckpt["rng_state"])
+        logger.info(
+            "Resumed from epoch=%d global_step=%d best_val_mae=%.4f best_test_mae=%.4f",
+            start_epoch, global_step, best_val_mae, best_test_mae,
+        )
 
     logger.info("=" * 70)
     logger.info("Training config:")
@@ -1028,10 +1070,34 @@ def main():
             best_val_mae = val_metrics["mae"]
             best_test_mae = test_metrics["mae"]
 
-        if (epoch + 1) % args.save_every_n_epochs == 0 or is_best:
-            ckpt_path = ckpt_dir / f"epoch_{epoch+1:03d}.pt"
+        ckpt_path = ckpt_dir / f"epoch_{epoch+1:03d}.pt"
+        checkpoint = {
+            "epoch": epoch + 1,
+            "global_step": global_step,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "val_mae": val_metrics["mae"],
+            "test_mae": test_metrics["mae"],
+            "best_val_mae": best_val_mae,
+            "best_test_mae": best_test_mae,
+            "best_ema_val_mae": best_ema_val_mae,
+            "ema_val_mae": ema_val_mae,
+            "early_stop_wait": early_stop_wait,
+            "rng_state": capture_rng_state(),
+            "args": vars(args),
+        }
+        torch.save(checkpoint, str(ckpt_path))
+        latest_path = ckpt_dir / "latest.pt"
+        torch.save(checkpoint, str(latest_path))
+        logger.info("Saved checkpoint: %s (epoch=%d val_mae=%.4f test_mae=%.4f)",
+                    ckpt_path, epoch + 1, val_metrics["mae"], test_metrics["mae"])
+
+        if is_best:
+            best_path = ckpt_dir / "best.pt"
             torch.save({
-                "epoch": epoch + 1, "global_step": global_step,
+                "epoch": epoch + 1,
+                "global_step": global_step,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
@@ -1039,26 +1105,15 @@ def main():
                 "test_mae": test_metrics["mae"],
                 "best_val_mae": best_val_mae,
                 "best_test_mae": best_test_mae,
+                "best_ema_val_mae": best_ema_val_mae,
+                "ema_val_mae": ema_val_mae,
+                "early_stop_wait": early_stop_wait,
+                "val_metrics": val_metrics,
+                "test_metrics": test_metrics,
+                "rng_state": capture_rng_state(),
                 "args": vars(args),
-            }, str(ckpt_path))
-            logger.info("Saved checkpoint: %s (best=%s, val_mae=%.4f, test_mae=%.4f)",
-                        ckpt_path, is_best, val_metrics["mae"], test_metrics["mae"])
-
-            if is_best:
-                best_path = ckpt_dir / "best.pt"
-                torch.save({
-                    "epoch": epoch + 1, "global_step": global_step,
-                    "model_state_dict": model.state_dict(),
-                    "val_mae": val_metrics["mae"],
-                    "test_mae": test_metrics["mae"],
-                    "best_val_mae": best_val_mae,
-                    "best_test_mae": best_test_mae,
-                    "val_metrics": val_metrics,
-                    "test_metrics": test_metrics,
-                    "args": vars(args),
-                }, str(best_path))
-                logger.info("New best model! val_mae=%.4f test_mae=%.4f",
-                            val_metrics["mae"], test_metrics["mae"])
+            }, str(best_path))
+            logger.info("New best model! val_mae=%.4f test_mae=%.4f", val_metrics["mae"], test_metrics["mae"])
 
         if args.early_stop_patience > 0 and early_stop_wait >= args.early_stop_patience:
             logger.info(

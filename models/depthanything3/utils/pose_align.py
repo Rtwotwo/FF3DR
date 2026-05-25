@@ -1,4 +1,6 @@
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+
+from __future__ import annotations
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +17,11 @@
 from typing import List
 import numpy as np
 import torch
-from evo.core.trajectory import PosePath3D
+
+try:
+    from evo.core.trajectory import PosePath3D
+except Exception:  # pragma: no cover - optional dependency
+    PosePath3D = None
 
 from depth_anything_3.utils.geometry import affine_inverse, affine_inverse_np
 
@@ -82,11 +88,31 @@ def _poses_from_ext(ext_ref, ext_est):
 
 
 def _umeyama_sim3_from_paths(pose_ref, pose_est):
-    path_ref = PosePath3D(poses_se3=pose_ref.copy())
-    path_est = PosePath3D(poses_se3=pose_est.copy())
-    r, t, s = path_est.align(path_ref, correct_scale=True)
-    pose_est_aligned = np.stack(path_est.poses_se3)
-    return r, t, s, pose_est_aligned
+    if PosePath3D is not None:
+        path_ref = PosePath3D(poses_se3=pose_ref.copy())
+        path_est = PosePath3D(poses_se3=pose_est.copy())
+        r, t, s = path_est.align(path_ref, correct_scale=True)
+        pose_est_aligned = np.stack(path_est.poses_se3)
+        return r, t, s, pose_est_aligned
+
+    # Fallback: align camera centers with a standard Umeyama Sim(3) fit.
+    ref_pts = pose_ref[:, :3, 3]
+    est_pts = pose_est[:, :3, 3]
+    mu_ref = ref_pts.mean(axis=0)
+    mu_est = est_pts.mean(axis=0)
+    ref_centered = ref_pts - mu_ref
+    est_centered = est_pts - mu_est
+    cov = (est_centered.T @ ref_centered) / float(len(ref_pts))
+    u, d, vt = np.linalg.svd(cov)
+    sgn = np.sign(np.linalg.det(u @ vt))
+    s_mat = np.eye(3)
+    s_mat[2, 2] = sgn
+    r = u @ s_mat @ vt
+    var_est = np.mean(np.sum(est_centered**2, axis=1))
+    scale = float(np.trace(np.diag(d) @ s_mat) / max(var_est, 1e-12))
+    t = mu_ref - scale * (r @ mu_est)
+    pose_est_aligned = _apply_sim3_to_poses(pose_est, r, t, scale)
+    return r, t, scale, pose_est_aligned
 
 
 def _apply_sim3_to_poses(poses, r, t, s):

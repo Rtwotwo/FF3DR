@@ -11,11 +11,13 @@
 #   EVAL_RECON      : true/false (是否计算重建指标)
 #   GPU_ID          : CUDA visible device id
 
-SPLIT="predict"
+SPLIT="${SPLIT:-test}"
 MODEL="depthanything3"
-LORA_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/train_lora_da3/da3_large_lora_whuomvs_0521/checkpoints/epoch_025.pt"
+# 默认使用你提供的微调最佳权重路径
+LORA_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/whu-omvs/train_lora_da3/da3_large_lora_whuomvs_0523/checkpoints/best.pt"
 AREAS="area2 area3"
-EVAL_DSM=true
+# 我们只关心深度指标，禁用 DSM/normal/recon 相关评估
+EVAL_DSM=false
 EVAL_NORMAL=false
 EVAL_RECON=false
 GPU_ID=5
@@ -27,10 +29,24 @@ DEPTH_ALIGN_METHOD="median"
 MULTIVIEW_NUM_NEIGHBORS=0
 MULTIVIEW_PROCESS_RES=504
 MULTIVIEW_REF_STRATEGY="saddle_balanced"
-SAVE_ADAMVS_FORMAT=false
+SAVE_ADAMVS_FORMAT=true
+CAMERA_IDS=(1 2 3 4 5)
+CHUNK_SIZE=30
+OVERLAP=15
+PROCESS_RES=518
+PROCESS_RES_METHOD="square"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+
+SPLIT="$(echo "${SPLIT}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${SPLIT}" == "tests" ]]; then
+	SPLIT="test"
+fi
+if [[ "${SPLIT}" != "predict" && "${SPLIT}" != "test" ]]; then
+	echo "[ERROR] SPLIT must be 'predict' or 'test', got: ${SPLIT}"
+	exit 1
+fi
 
 if [[ "${SPLIT}" == "test" ]]; then
 	DATASET_PATH="${PROJECT_ROOT}/dataset/WHU-OMVS/test"
@@ -53,6 +69,9 @@ echo "  Eval DSM:         ${EVAL_DSM}"
 echo "  Eval normal:      ${EVAL_NORMAL}"
 echo "  Eval recon:       ${EVAL_RECON}"
 echo "  Align method:     ${DEPTH_ALIGN_METHOD}"
+echo "  Cameras:          ${CAMERA_IDS[*]}"
+echo "  Chunk:            ${CHUNK_SIZE}, overlap=${OVERLAP}"
+echo "  Resize:           ${PROCESS_RES} (${PROCESS_RES_METHOD})"
 echo "  GPU:              ${GPU_ID}"
 echo "============================================"
 
@@ -60,8 +79,7 @@ ARGS=(
 	--model_name "${MODEL}"
 	--dataset_path "${DATASET_PATH}"
 	--split "${SPLIT}"
-	--output_path "${OUTPUT_FOLDER}"
-	--camera_ids 1 2 3 4 5
+	--camera_ids "${CAMERA_IDS[@]}"
 	--batch_size "${BATCH_SIZE}"
 	--align_mode median
 	--outlier_threshold "${OUTLIER_THRESHOLD}"
@@ -71,10 +89,6 @@ ARGS=(
 	--multiview_ref_strategy "${MULTIVIEW_REF_STRATEGY}"
 	--lora_checkpoint "${LORA_CHECKPOINT}"
 )
-
-if [[ "${SPLIT}" == "test" && -n "${AREAS}" ]]; then
-	ARGS+=(--areas ${AREAS})
-fi
 
 if [[ "${EVAL_DSM}" == "true" ]]; then
 	ARGS+=(--eval_dsm)
@@ -90,11 +104,96 @@ if [[ "${EVAL_RECON}" == "true" ]]; then
 	ARGS+=(--eval_recon)
 fi
 
-if [[ "${SAVE_ADAMVS_FORMAT}" == "true" ]]; then
-	ARGS+=(--save_adamvs_format)
-fi
+run_one_split() {
+	local run_output_folder="$1"
+	local viz_root="$2"
+	local area_arg="$3"
+	local adamvs_output_path="${run_output_folder}/adamvs_output"
+	local metric_args=("${ARGS[@]}" --output_path "${run_output_folder}" --adamvs_output_path "${adamvs_output_path}" --save_adamvs_format)
+	if [[ -n "${area_arg}" ]]; then
+		metric_args+=(--areas "${area_arg}")
+	fi
 
-CUDA_VISIBLE_DEVICES=$GPU_ID python3 "${PROJECT_ROOT}/running/inference/run_whuomvs_dsm_metric_inference.py" "${ARGS[@]}"
+	CUDA_VISIBLE_DEVICES=$GPU_ID python3 "${PROJECT_ROOT}/running/inference/run_whuomvs_dsm_metric_inference.py" "${metric_args[@]}"
+
+	if [[ ! -d "${adamvs_output_path}" ]]; then
+		echo "[WARN] Adamvs output not found: ${adamvs_output_path}"
+		return 0
+	fi
+
+	python3 - <<PY
+import os
+from pathlib import Path
+import sys
+import numpy as np
+import cv2
+import matplotlib.cm as cm
+
+repo_root = Path("${PROJECT_ROOT}")
+sys.path.insert(0, str(repo_root))
+from running.training.datasets_adamvs.data_io import read_pfm
+
+adamvs_output = Path("${adamvs_output_path}")
+viz_root = Path("${viz_root}")
+split_name = "${SPLIT}"
+area_name = "${area_arg}"
+model_name = "${MODEL}"
+camera_ids = ["${CAMERA_IDS[0]}", "${CAMERA_IDS[1]}", "${CAMERA_IDS[2]}", "${CAMERA_IDS[3]}", "${CAMERA_IDS[4]}"]
+
+def depth_to_color(depth_map):
+    depth = np.asarray(depth_map, dtype=np.float32)
+    valid = np.isfinite(depth) & (depth > 0)
+    h, w = depth.shape[:2]
+    if not np.any(valid):
+        return np.zeros((h, w, 3), dtype=np.uint8)
+    depth_min = float(depth[valid].min())
+    depth_max = float(depth[valid].max())
+    if depth_max <= depth_min:
+        depth_max = depth_min + 1e-6
+    depth_norm = np.clip((depth - depth_min) / (depth_max - depth_min), 0.0, 1.0)
+    depth_rgb = cm.viridis(depth_norm)[:, :, :3]
+    depth_bgr = (depth_rgb[:, :, ::-1] * 255.0).astype(np.uint8)
+    depth_bgr[~valid] = 0
+    return depth_bgr
+
+if not adamvs_output.exists():
+    print(f"[WARN] missing adamvs output dir: {adamvs_output}")
+    raise SystemExit(0)
+
+for cam_dir in sorted([p for p in adamvs_output.iterdir() if p.is_dir()], key=lambda p: p.name):
+    cam_id = cam_dir.name
+    if cam_id not in camera_ids:
+        continue
+    if split_name == "predict":
+        out_dir = viz_root / f"run_da3lora_{model_name}_predict_came{cam_id}"
+    else:
+        out_dir = viz_root / f"run_da3lora_{model_name}_test_came{cam_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pfm_files = sorted(cam_dir.glob("*_init.pfm"))
+    for pfm_path in pfm_files:
+        try:
+            depth, _ = read_pfm(str(pfm_path))
+        except Exception as exc:
+            print(f"[WARN] failed reading {pfm_path}: {exc}")
+            continue
+        if depth.ndim == 3:
+            depth = depth[..., 0]
+        depth_color = depth_to_color(depth)
+        out_png = out_dir / f"{pfm_path.stem.replace('_init', '')}_depth.png"
+        cv2.imwrite(str(out_png), depth_color)
+
+print(f"[INFO] depth visualizations saved to: {viz_root}")
+PY
+}
+
+if [[ "${SPLIT}" == "predict" ]]; then
+	run_one_split "${OUTPUT_FOLDER}" "${OUTPUT_FOLDER}/viz_predict" ""
+else
+	for AREA in ${AREAS}; do
+		run_one_split "${OUTPUT_FOLDER}/${AREA}" "${OUTPUT_FOLDER}/viz_test/${AREA}" "${AREA}"
+	done
+fi
 
 echo ""
 echo "[INFO] Done!"
@@ -103,5 +202,5 @@ echo "[INFO] Output folder: ${OUTPUT_FOLDER}"
 if [[ "${SPLIT}" == "test" && "${EVAL_DSM}" == "true" ]]; then
 	echo ""
 	echo "[INFO] Metrics files location:"
-	echo "  Metrics:    ${OUTPUT_FOLDER}/${SPLIT}_cam1_cam2_cam3_cam4_cam5_${MODEL}*_metrics.json"
+	echo "  Metrics:    ${OUTPUT_FOLDER}/{area_name}/${SPLIT}_cam1_cam2_cam3_cam4_cam5_${MODEL}*_metrics.json"
 fi
