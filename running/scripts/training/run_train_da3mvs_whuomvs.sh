@@ -24,13 +24,14 @@ PRETRAINED_PATH=""
 ADAMVS_CKPT="${PROJECT_ROOT}/weights/adamvs/adamvs_whuomvs/model_000019_0.1339.ckpt"
 ADAMVS_FEATURE_STAGE="stage3"
 FUSION_DIM=128
+FUSION_TYPE="cross_attention_gated"
 GPUS="5"
 BATCH_SIZE=4
 PROCESS_RES=504
 EPOCHS=40
 LR=1e-5
 WEIGHT_DECAY=1e-4
-WARMUP_STEPS=500
+WARMUP_STEPS=1000
 GRAD_ACCUM_STEPS=2
 LORA_RANK=16
 LORA_ALPHA=32
@@ -38,22 +39,25 @@ LORA_DROPOUT=0.05
 LORA_TARGET_MODULES="qkv proj"
 ADAPTER_HIDDEN_DIM=64
 ADAPTER_DEPTH_NORM=600.0
-LOSS_PROFILE="depth_only"
-RELATIVE_SI_WEIGHT=0.0
-METRIC_SI_WEIGHT=0.0
+LOSS_PROFILE="metric_v4"
+RELATIVE_SI_WEIGHT=0.2
+METRIC_SI_WEIGHT=1.0
 PHASE1_METRIC_SI_WEIGHT=0.0
 PHASE3_METRIC_SI_WEIGHT=0.0
-LOGL1_WEIGHT=0.1
+TRAIN_ADAMVS=false
+LOGL1_WEIGHT=0.2
 L1_WEIGHT=1.0
-ABSREL_WEIGHT=0.0
-GRADIENT_WEIGHT=0.1
-RANGE_WEIGHT=0.0
-CONFIDENCE_WEIGHT=0.0
-SKY_WEIGHT=0.0
+ABSREL_WEIGHT=0.3
+GRADIENT_WEIGHT=0.15
+RANGE_WEIGHT=0.02
+CONFIDENCE_WEIGHT=0.05
+SKY_WEIGHT=0.02
 MAX_GRAD_NORM=1.0
 EMA_ALPHA=0.2
-EARLY_STOP_PATIENCE=8
-EARLY_STOP_MIN_DELTA=0.01
+EARLY_STOP_PATIENCE=25
+EARLY_STOP_MIN_DELTA=0.002
+MIN_EPOCHS_BEFORE_EARLY_STOP=15
+LOSS_SPIKE_CLIP_RATIO=2.5
 CONFIDENCE_TAU=120.0
 SKY_THRESHOLD=0.3
 NUM_WORKERS=4
@@ -75,6 +79,7 @@ while [[ $# -gt 0 ]]; do
 		--adamvs_ckpt)         shift; ADAMVS_CKPT="$1" ;;
 		--adamvs_feature_stage) shift; ADAMVS_FEATURE_STAGE="$1" ;;
 		--fusion_dim)          shift; FUSION_DIM="$1" ;;
+		--fusion_type)         shift; FUSION_TYPE="$1" ;;
 		--gpus)                shift; GPUS="$1" ;;
 		--batch_size)          shift; BATCH_SIZE="$1" ;;
 		--process_res)         shift; PROCESS_RES="$1" ;;
@@ -103,8 +108,11 @@ while [[ $# -gt 0 ]]; do
 		--ema_alpha)           shift; EMA_ALPHA="$1" ;;
 		--early_stop_patience) shift; EARLY_STOP_PATIENCE="$1" ;;
 		--early_stop_min_delta) shift; EARLY_STOP_MIN_DELTA="$1" ;;
+		--min_epochs_before_early_stop) shift; MIN_EPOCHS_BEFORE_EARLY_STOP="$1" ;;
+		--loss_spike_clip_ratio) shift; LOSS_SPIKE_CLIP_RATIO="$1" ;;
 		--confidence_tau)      shift; CONFIDENCE_TAU="$1" ;;
 		--sky_threshold)       shift; SKY_THRESHOLD="$1" ;;
+		--train_adamvs)        TRAIN_ADAMVS=true ;;
 		--num_workers)         shift; NUM_WORKERS="$1" ;;
 		--max_train_samples)   shift; MAX_TRAIN_SAMPLES="$1" ;;
 		--max_val_samples)     shift; MAX_VAL_SAMPLES="$1" ;;
@@ -127,6 +135,7 @@ echo "Output:         ${OUTPUT_DIR}"
 echo "Ada-MVS ckpt:   ${ADAMVS_CKPT}"
 echo "Ada feat stage: ${ADAMVS_FEATURE_STAGE}"
 echo "Fusion dim:     ${FUSION_DIM}"
+echo "Fusion type:    ${FUSION_TYPE}"
 echo "GPU:            ${GPUS}"
 echo "Batch size:     ${BATCH_SIZE} x grad_accum=${GRAD_ACCUM_STEPS} = effective $((BATCH_SIZE * GRAD_ACCUM_STEPS))"
 echo "Process res:    ${PROCESS_RES}"
@@ -135,8 +144,10 @@ echo "LR:             ${LR}, warmup=${WARMUP_STEPS}"
 echo "LoRA:           rank=${LORA_RANK}, alpha=${LORA_ALPHA}, targets=${LORA_TARGET_MODULES}"
 echo "Adapter:        hidden=${ADAPTER_HIDDEN_DIM}, depth_norm=${ADAPTER_DEPTH_NORM}"
 echo "Profile:        ${LOSS_PROFILE}"
+echo "Train AdamVS:   ${TRAIN_ADAMVS}"
 echo "Loss:           si=${RELATIVE_SI_WEIGHT} logl1=${LOGL1_WEIGHT} l1=${L1_WEIGHT} grad=${GRADIENT_WEIGHT} range=${RANGE_WEIGHT}"
 echo "Stability:      grad_clip=${MAX_GRAD_NORM} ema_alpha=${EMA_ALPHA} early_stop=${EARLY_STOP_PATIENCE} mae_delta=${EARLY_STOP_MIN_DELTA}"
+echo "Stability+:     min_epochs_stop=${MIN_EPOCHS_BEFORE_EARLY_STOP} loss_spike_clip=${LOSS_SPIKE_CLIP_RATIO}"
 echo "Resume:         ${RESUME:-none}"
 echo "============================================"
 
@@ -152,6 +163,12 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 
+if command -v conda >/dev/null 2>&1; then
+	# Ensure training uses the requested conda environment.
+	eval "$(conda shell.bash hook)"
+	conda activate depthanything
+fi
+
 python3 -m running.training.run_train_da3mvs_whuomvs \
 	--dataset_root "${DATASET_ROOT}" \
 	--output_dir "${OUTPUT_DIR}" \
@@ -160,6 +177,7 @@ python3 -m running.training.run_train_da3mvs_whuomvs \
 	--adamvs_ckpt "${ADAMVS_CKPT}" \
 	--adamvs_feature_stage ${ADAMVS_FEATURE_STAGE} \
 	--fusion_dim ${FUSION_DIM} \
+	--fusion_type ${FUSION_TYPE} \
 	--process_res ${PROCESS_RES} \
 	--batch_size ${BATCH_SIZE} \
 	--num_workers ${NUM_WORKERS} \
@@ -188,6 +206,8 @@ python3 -m running.training.run_train_da3mvs_whuomvs \
 	--ema_alpha ${EMA_ALPHA} \
 	--early_stop_patience ${EARLY_STOP_PATIENCE} \
 	--early_stop_min_delta ${EARLY_STOP_MIN_DELTA} \
+	--min_epochs_before_early_stop ${MIN_EPOCHS_BEFORE_EARLY_STOP} \
+	--loss_spike_clip_ratio ${LOSS_SPIKE_CLIP_RATIO} \
 	--confidence_tau ${CONFIDENCE_TAU} \
 	--sky_threshold ${SKY_THRESHOLD} \
 	--max_train_samples ${MAX_TRAIN_SAMPLES} \
@@ -197,6 +217,7 @@ python3 -m running.training.run_train_da3mvs_whuomvs \
 	--seed ${SEED} \
 	--log_level ${LOG_LEVEL} \
 	--gpus "${GPUS}" \
+	$(if [[ "${TRAIN_ADAMVS}" == "true" ]]; then echo "--train_adamvs"; fi) \
 	${RESUME_FLAG} \
 	${EXTRA_ARGS} 2>&1 | tee "${OUTPUT_DIR}_train.log"
 

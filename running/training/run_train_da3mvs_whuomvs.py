@@ -27,7 +27,7 @@ for p in (_REPO_ROOT, _REPO_ROOT / "models", _SCRIPT_DIR.parent):
         sys.path.insert(0, str(p))
 
 from running.data.whuomvs_depth_dataset import WHUOMVSDepthDataset
-from running.training.da3_metric_loss import DepthOnlyLoss
+from running.training.da3_metric_loss import DepthOnlyLoss, MetricDepthLossV4
 from models.adamvs.adamvs import FeatureNet0
 
 logger = logging.getLogger(__name__)
@@ -299,13 +299,145 @@ class LayerAttentionFusionHead(nn.Module):
         return fused_metric, {"fusion_delta": delta, "fusion_gate": gate}
 
 
+class ChannelGatedFusionHead(nn.Module):
+    """SE-style channel attention + spatial gate fusion."""
+
+    def __init__(self, da3_in_dim: int, ada_in_dim: int, fusion_dim: int = 128, reduction: int = 16):
+        super().__init__()
+        self.da3_proj = nn.Conv2d(da3_in_dim, fusion_dim, kernel_size=1)
+        self.ada_proj = nn.Conv2d(ada_in_dim, fusion_dim, kernel_size=1)
+
+        hidden = max(fusion_dim // max(reduction, 1), 8)
+        self.da3_se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(fusion_dim, hidden, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, fusion_dim, kernel_size=1),
+            nn.Sigmoid(),
+        )
+        self.ada_se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(fusion_dim, hidden, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, fusion_dim, kernel_size=1),
+            nn.Sigmoid(),
+        )
+        self.gate_predictor = nn.Sequential(
+            nn.Conv2d(fusion_dim * 2, fusion_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(fusion_dim, 1, kernel_size=1),
+        )
+        self.refine = nn.Sequential(
+            nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.delta_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
+
+    def forward(self, da3_pre_head_feat: torch.Tensor, adamvs_feat: torch.Tensor, base_metric_depth: torch.Tensor):
+        target_hw = da3_pre_head_feat.shape[-2:]
+        if adamvs_feat.shape[-2:] != target_hw:
+            adamvs_feat = F.interpolate(adamvs_feat, size=target_hw, mode="bilinear", align_corners=True)
+
+        da3_p = self.da3_proj(da3_pre_head_feat)
+        ada_p = self.ada_proj(adamvs_feat)
+        da3_a = da3_p * self.da3_se(da3_p)
+        ada_a = ada_p * self.ada_se(ada_p)
+
+        gate = torch.sigmoid(self.gate_predictor(torch.cat([da3_a, ada_a], dim=1))).squeeze(1)
+        fused = gate.unsqueeze(1) * da3_a + (1.0 - gate.unsqueeze(1)) * ada_a
+        fused = self.refine(fused)
+
+        delta = self.delta_head(fused).squeeze(1)
+        pred = torch.clamp(base_metric_depth + delta, min=1e-3)
+        return pred, {"fusion_delta": delta, "fusion_gate": gate}
+
+
+class CrossAttentionGatedFusionHead(nn.Module):
+    """Cross-attention fusion with token budget control and spatial gating."""
+
+    def __init__(
+        self,
+        da3_in_dim: int,
+        ada_in_dim: int,
+        fusion_dim: int = 128,
+        num_heads: int = 4,
+        max_tokens: int = 4096,
+    ):
+        super().__init__()
+        self.max_tokens = int(max_tokens)
+        self.da3_proj = nn.Conv2d(da3_in_dim, fusion_dim, kernel_size=1)
+        self.ada_proj = nn.Conv2d(ada_in_dim, fusion_dim, kernel_size=1)
+
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=fusion_dim,
+            num_heads=num_heads,
+            batch_first=True,
+            dropout=0.0,
+        )
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(fusion_dim),
+            nn.Linear(fusion_dim, fusion_dim * 2),
+            nn.GELU(),
+            nn.Linear(fusion_dim * 2, fusion_dim),
+        )
+        self.refine = nn.Sequential(
+            nn.Conv2d(fusion_dim * 2, fusion_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.gate_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
+        self.delta_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
+
+    def _downsample_for_attention(self, da3_feat: torch.Tensor, ada_feat: torch.Tensor):
+        b, c, h, w = da3_feat.shape
+        scale = 1
+        num_tokens = h * w
+        if num_tokens > self.max_tokens:
+            scale = int(math.ceil(math.sqrt(num_tokens / float(self.max_tokens))))
+            da3_ds = F.avg_pool2d(da3_feat, kernel_size=scale, stride=scale)
+            ada_ds = F.avg_pool2d(ada_feat, kernel_size=scale, stride=scale)
+            return da3_ds, ada_ds, scale
+        return da3_feat, ada_feat, scale
+
+    def forward(self, da3_pre_head_feat: torch.Tensor, adamvs_feat: torch.Tensor, base_metric_depth: torch.Tensor):
+        target_hw = da3_pre_head_feat.shape[-2:]
+        if adamvs_feat.shape[-2:] != target_hw:
+            adamvs_feat = F.interpolate(adamvs_feat, size=target_hw, mode="bilinear", align_corners=True)
+
+        da3_p = self.da3_proj(da3_pre_head_feat)
+        ada_p = self.ada_proj(adamvs_feat)
+
+        da3_ds, ada_ds, _ = self._downsample_for_attention(da3_p, ada_p)
+        b, c, h_ds, w_ds = da3_ds.shape
+
+        q = da3_ds.flatten(2).transpose(1, 2)
+        kv = ada_ds.flatten(2).transpose(1, 2)
+        attn_out, _ = self.cross_attn(q, kv, kv, need_weights=False)
+        attn_out = attn_out + self.ffn(attn_out)
+        attn_map = attn_out.transpose(1, 2).reshape(b, c, h_ds, w_ds)
+
+        if attn_map.shape[-2:] != target_hw:
+            attn_map = F.interpolate(attn_map, size=target_hw, mode="bilinear", align_corners=True)
+
+        fused_feat = self.refine(torch.cat([da3_p, attn_map], dim=1))
+        gate = torch.sigmoid(self.gate_head(fused_feat)).squeeze(1)
+        delta = self.delta_head(fused_feat).squeeze(1)
+        fused_metric = torch.clamp(base_metric_depth + gate * delta, min=1e-3)
+        return fused_metric, {"fusion_delta": delta, "fusion_gate": gate}
+
+
 class DA3MVSForMetricDepth(nn.Module):
     def __init__(
         self,
         da3_model,
         scale_shift: MetricScaleShift,
         adamvs_encoder: AdaMVSFeatureEncoder,
-        fusion_head: DA3MVSFusionHead,
+        fusion_head: nn.Module,
     ):
         super().__init__()
         self.da3 = da3_model
@@ -598,11 +730,16 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
         valid_mask = batch["valid_mask"].to(device)
         images_input = images.unsqueeze(1)
 
-        pred_depth, _, pred_conf, pred_sky, _ = raw(images_input)
+        pred_depth, pred_metric, pred_conf, pred_sky, aux_out = raw(images_input)
 
         if pred_depth.shape[-2:] != depth_gt.shape[-2:]:
             pred_depth = F.interpolate(
                 pred_depth.unsqueeze(1), size=depth_gt.shape[-2:],
+                mode="bilinear", align_corners=True,
+            ).squeeze(1)
+        if pred_metric.shape[-2:] != depth_gt.shape[-2:]:
+            pred_metric = F.interpolate(
+                pred_metric.unsqueeze(1), size=depth_gt.shape[-2:],
                 mode="bilinear", align_corners=True,
             ).squeeze(1)
         if pred_conf is not None and pred_conf.shape[-2:] != depth_gt.shape[-2:]:
@@ -616,11 +753,19 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
                 mode="bilinear", align_corners=True,
             ).squeeze(1)
 
-        loss_dict = criterion(
-            pred_depth,
-            depth_gt,
-            valid_mask,
-        )
+        if isinstance(criterion, MetricDepthLossV4):
+            loss_dict = criterion(
+                pred_depth=pred_depth,
+                pred_metric=pred_metric,
+                gt_depth=depth_gt,
+                valid_mask=valid_mask,
+                pred_conf=pred_conf,
+                pred_sky=pred_sky,
+                log_scale=aux_out.get("metric_log_scale", None),
+                shift=aux_out.get("metric_shift", None),
+            )
+        else:
+            loss_dict = criterion(pred_metric, depth_gt, valid_mask)
         total_loss += loss_dict["loss"].item()
 
         if not logged_depth_images and writer is not None:
@@ -628,7 +773,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
             n_vis = min(images.shape[0], 2)
             for vi in range(n_vis):
                 gt_vis = depth_gt[vi].cpu().numpy()
-                pred_vis = pred_depth[vi].cpu().numpy()
+                pred_vis = pred_metric[vi].cpu().numpy()
                 mask_vis = valid_mask[vi].cpu().numpy().astype(bool)
                 if gt_vis.ndim == 3 and gt_vis.shape[0] == 1:
                     gt_vis = gt_vis[0]
@@ -668,7 +813,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
                     global_step,
                 )
 
-        pred_np = pred_depth.cpu().numpy()
+        pred_np = pred_metric.cpu().numpy()
         gt_np = depth_gt.cpu().numpy()
         mask_np = valid_mask.cpu().numpy().astype(bool)
         if pred_np.ndim == 4 and pred_np.shape[1] == 1:
@@ -745,17 +890,15 @@ def main():
     parser.add_argument("--process_res", type=int, default=504)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--lr", type=float, default=5e-6)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--warmup_steps", type=int, default=500)
+    parser.add_argument("--warmup_steps", type=int, default=1500)
     parser.add_argument("--grad_accum_steps", type=int, default=4)
     parser.add_argument("--lora_rank", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--lora_target_modules", nargs="+", default=["qkv", "proj"])
-    parser.add_argument("--phase1_epochs", type=int, default=2)
-    parser.add_argument("--phase2_epochs", type=int, default=10)
     parser.add_argument("--adapter_hidden_dim", type=int, default=64)
     parser.add_argument("--adapter_depth_norm", type=float, default=600.0)
     parser.add_argument(
@@ -770,9 +913,9 @@ def main():
         choices=["stage1", "stage2", "stage3"],
     )
     parser.add_argument("--fusion_dim", type=int, default=128)
-    parser.add_argument("--fusion_type", type=str, default="layer_attention", choices=["conv", "layer_attention"])
-    parser.add_argument("--train_adamvs", action="store_true", help="If set, Ada-MVS encoder parameters will be trained jointly (do not freeze)")
-    parser.add_argument("--loss_profile", type=str, default="depth_only", choices=["depth_only"])
+    parser.add_argument("--fusion_type", type=str, default="cross_attention_gated", choices=["conv", "layer_attention", "channel_gated", "cross_attention_gated"])
+    parser.add_argument("--train_adamvs", action="store_true", help="If set, Ada-MVS encoder parameters will be trained jointly")
+    parser.add_argument("--loss_profile", type=str, default="metric_v4", choices=["depth_only", "metric_v4"])
     parser.add_argument("--relative_si_weight", type=float, default=0.0)
     parser.add_argument("--metric_si_weight", type=float, default=0.0)
     parser.add_argument("--phase1_metric_si_weight", type=float, default=0.0)
@@ -798,13 +941,12 @@ def main():
     parser.add_argument("--save_every_n_epochs", type=int, default=5)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
-    parser.add_argument("--phase1_lr_scale", type=float, default=0.8)
-    parser.add_argument("--phase2_lr_scale", type=float, default=1.0)
-    parser.add_argument("--phase3_lr_scale", type=float, default=0.9)
     parser.add_argument("--ema_alpha", type=float, default=0.2)
     parser.add_argument("--early_stop_patience", type=int, default=8)
     parser.add_argument("--early_stop_min_delta", type=float, default=0.01)
     parser.add_argument("--early_stop_absrel_min_delta", type=float, default=0.0005)
+    parser.add_argument("--min_epochs_before_early_stop", type=int, default=15)
+    parser.add_argument("--loss_spike_clip_ratio", type=float, default=3.0)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -870,6 +1012,18 @@ def main():
             ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
             fusion_dim=args.fusion_dim,
         ).to(device)
+    elif args.fusion_type == "channel_gated":
+        fusion_head = ChannelGatedFusionHead(
+            da3_in_dim=128,
+            ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
+            fusion_dim=args.fusion_dim,
+        ).to(device)
+    elif args.fusion_type == "cross_attention_gated":
+        fusion_head = CrossAttentionGatedFusionHead(
+            da3_in_dim=128,
+            ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
+            fusion_dim=args.fusion_dim,
+        ).to(device)
     else:
         fusion_head = DA3MVSFusionHead(
             da3_in_dim=128,
@@ -888,7 +1042,7 @@ def main():
     )
     da3_model.model = da3_inner
 
-    set_phase_grads(model, 1, train_adamvs=args.train_adamvs)
+    set_phase_grads(model, 3, train_adamvs=args.train_adamvs)
 
     raw_model = get_raw_model(model)
     head_params = count_params_safe(raw_model.da3.model.head)
@@ -899,15 +1053,35 @@ def main():
                 head_params, sum(p.numel() for p in raw_model.scale_shift.parameters()))
     logger.info("Depth-only mode with Ada-MVS feature fusion enabled.")
 
-    criterion = DepthOnlyLoss(
-        si_weight=args.relative_si_weight,
-        logl1_weight=args.logl1_weight,
-        l1_weight=args.l1_weight,
-        gradient_weight=args.gradient_weight,
-        range_weight=args.range_weight,
-        depth_range=(1.0, args.adapter_depth_norm * 3.5),
-        median_align=False,
-    )
+    if args.loss_profile == "metric_v4":
+        criterion = MetricDepthLossV4(
+            relative_si_weight=args.relative_si_weight,
+            metric_si_weight=args.metric_si_weight,
+            logl1_weight=args.logl1_weight,
+            l1_weight=args.l1_weight,
+            absrel_weight=args.absrel_weight,
+            gradient_weight=args.gradient_weight,
+            range_weight=args.range_weight,
+            confidence_weight=args.confidence_weight,
+            sky_weight=args.sky_weight,
+            depth_range=(1.0, args.adapter_depth_norm * 3.5),
+            depth_norm=args.adapter_depth_norm,
+            confidence_tau=args.confidence_tau,
+            sky_threshold=args.sky_threshold,
+            far_depth_start=args.far_depth_start,
+            far_depth_boost=args.far_depth_boost,
+            far_depth_transition=args.far_depth_transition,
+        )
+    else:
+        criterion = DepthOnlyLoss(
+            si_weight=args.relative_si_weight,
+            logl1_weight=args.logl1_weight,
+            l1_weight=args.l1_weight,
+            gradient_weight=args.gradient_weight,
+            range_weight=args.range_weight,
+            depth_range=(1.0, args.adapter_depth_norm * 3.5),
+            median_align=False,
+        )
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -945,6 +1119,7 @@ def main():
     ema_val_mae: Optional[float] = None
     early_stop_wait = 0
     global_step = 0
+    loss_ema: Optional[torch.Tensor] = None
 
     if args.resume and os.path.exists(args.resume):
         logger.info("Resuming from checkpoint: %s", args.resume)
@@ -980,12 +1155,13 @@ def main():
     logger.info("  Model: %s (%.1fM params)", args.model_name, total_params / 1e6)
     logger.info("  Train: %d samples, Val: %d samples, Test: %d samples",
                 len(train_dataset), len(val_dataset), len(test_dataset))
-    logger.info("  Epochs: %d (single-stage depth-only)", args.epochs)
+    logger.info("  Epochs: %d (single-stage joint training)", args.epochs)
     logger.info("  LR: %.2e, Warmup: %d steps, Grad accum: %d",
                 args.lr, warmup_steps, args.grad_accum_steps)
     logger.info("  Loss profile: %s | DA3 pre-head + Ada-MVS(%s) feature fusion", args.loss_profile, args.adamvs_feature_stage)
     logger.info("  LoRA: rank=%d, alpha=%d", args.lora_rank, args.lora_alpha)
     logger.info("  Ada-MVS ckpt: %s | fusion_dim=%d", adamvs_ckpt, args.fusion_dim)
+    logger.info("  train_adamvs=%s | fusion_type=%s", args.train_adamvs, args.fusion_type)
     logger.info("  Loss: si=%.1f logl1=%.1f l1=%.1f grad=%.2f range=%.2f",
                 args.relative_si_weight, args.logl1_weight, args.l1_weight,
                 args.gradient_weight, args.range_weight)
@@ -1002,7 +1178,7 @@ def main():
         current_lr = optimizer.param_groups[0]["lr"]
         logger.info("=" * 70)
         logger.info("Epoch %d/%d | trainable=%d lr=%.2e (sched=%.2e)",
-                    epoch + 1, args.epochs, trainable_now, current_lr, sched_lr)
+                epoch + 1, args.epochs, trainable_now, current_lr, sched_lr)
         logger.info("=" * 70)
 
         model.train()
@@ -1018,7 +1194,7 @@ def main():
             valid_mask = batch["valid_mask"].to(device)
             images_input = images.unsqueeze(1)
 
-            pred_depth, pred_metric, _, _, aux_out = model(images_input)
+            pred_depth, pred_metric, pred_conf, pred_sky, aux_out = model(images_input)
 
             if pred_depth.shape[-2:] != depth_gt.shape[-2:]:
                 pred_depth = F.interpolate(
@@ -1030,9 +1206,42 @@ def main():
                     pred_metric.unsqueeze(1), size=depth_gt.shape[-2:],
                     mode="bilinear", align_corners=True,
                 ).squeeze(1)
+            if pred_conf is not None and pred_conf.shape[-2:] != depth_gt.shape[-2:]:
+                pred_conf = F.interpolate(
+                    pred_conf.unsqueeze(1), size=depth_gt.shape[-2:],
+                    mode="bilinear", align_corners=True,
+                ).squeeze(1)
+            if pred_sky is not None and pred_sky.shape[-2:] != depth_gt.shape[-2:]:
+                pred_sky = F.interpolate(
+                    pred_sky.unsqueeze(1), size=depth_gt.shape[-2:],
+                    mode="bilinear", align_corners=True,
+                ).squeeze(1)
 
-            loss_dict = criterion(pred_metric, depth_gt, valid_mask)
-            loss = loss_dict["loss"] / args.grad_accum_steps
+            if isinstance(criterion, MetricDepthLossV4):
+                loss_dict = criterion(
+                    pred_depth=pred_depth,
+                    pred_metric=pred_metric,
+                    gt_depth=depth_gt,
+                    valid_mask=valid_mask,
+                    pred_conf=pred_conf,
+                    pred_sky=pred_sky,
+                    log_scale=aux_out.get("metric_log_scale", None),
+                    shift=aux_out.get("metric_shift", None),
+                )
+            else:
+                loss_dict = criterion(pred_metric, depth_gt, valid_mask)
+            raw_loss = loss_dict["loss"]
+            if loss_ema is None:
+                loss_ema = raw_loss.detach()
+            else:
+                loss_ema = 0.95 * loss_ema + 0.05 * raw_loss.detach()
+            if args.loss_spike_clip_ratio > 0:
+                ceiling = loss_ema * args.loss_spike_clip_ratio
+                clip_scale = torch.clamp(ceiling / raw_loss.detach().clamp_min(1e-6), max=1.0)
+                loss = (raw_loss * clip_scale) / args.grad_accum_steps
+            else:
+                clip_scale = torch.tensor(1.0, device=device)
+                loss = raw_loss / args.grad_accum_steps
             loss.backward()
 
             if (step + 1) % args.grad_accum_steps == 0:
@@ -1052,12 +1261,16 @@ def main():
                 current_lr = optimizer.param_groups[0]["lr"]
                 train_log = {
                     "loss_total": loss_dict["loss"].item(),
-                    "si_loss": loss_dict["si_loss"].item(),
+                    "loss_ema": float(loss_ema.item()) if loss_ema is not None else loss_dict["loss"].item(),
+                    "loss_clip_scale": float(clip_scale.item()),
+                    "si_loss": float(loss_dict.get("si_loss", loss_dict.get("metric_si_loss", torch.tensor(0.0, device=device))).item()),
                     "logl1_loss": loss_dict["logl1_loss"].item(),
                     "l1_loss": loss_dict["l1_loss"].item(),
                     "gradient_loss": loss_dict["gradient_loss"].item(),
                     "range_loss": loss_dict["range_loss"].item(),
-                    "median_scale": loss_dict["median_scale"].item(),
+                    "median_scale": float(loss_dict.get("median_scale", torch.tensor(1.0, device=device)).item()),
+                    "metric_si_loss": float(loss_dict.get("metric_si_loss", torch.tensor(0.0, device=device)).item()),
+                    "absrel_loss": float(loss_dict.get("absrel_loss", torch.tensor(0.0, device=device)).item()),
                     "grad_norm": float(grad_norm.item()),
                 }
                 if aux_out.get("fusion_gate", None) is not None:
@@ -1079,11 +1292,14 @@ def main():
             if step % 500 == 0:
                 current_lr = scheduler.get_last_lr()[0]
                 logger.info(
-                    "  E%d/%d Step %d/%d | lr=%.2e loss=%.2f si=%.4f logl1=%.4f l1=%.2f grad=%.4f median_scale=%.4f gate=%.3f",
+                    "  E%d/%d Step %d/%d | lr=%.2e loss=%.2f si=%.4f metric_si=%.4f absrel=%.4f logl1=%.4f l1=%.2f grad=%.4f gate=%.3f",
                     epoch + 1, args.epochs, step, len(train_loader),
-                    current_lr, loss_dict["loss"].item(), loss_dict["si_loss"].item(),
+                    current_lr, loss_dict["loss"].item(),
+                    float(loss_dict.get("si_loss", loss_dict.get("metric_si_loss", torch.tensor(0.0, device=device))).item()),
+                    float(loss_dict.get("metric_si_loss", torch.tensor(0.0, device=device)).item()),
+                    float(loss_dict.get("absrel_loss", torch.tensor(0.0, device=device)).item()),
                     loss_dict["logl1_loss"].item(), loss_dict["l1_loss"].item(),
-                    loss_dict["gradient_loss"].item(), loss_dict["median_scale"].item(),
+                    loss_dict["gradient_loss"].item(),
                     float(aux_out["fusion_gate"].mean().item()) if aux_out.get("fusion_gate", None) is not None else 0.0,
                 )
 
@@ -1180,7 +1396,7 @@ def main():
             }, str(best_path))
             logger.info("New best model! val_mae=%.4f test_mae=%.4f", val_metrics["mae"], test_metrics["mae"])
 
-        if args.early_stop_patience > 0 and early_stop_wait >= args.early_stop_patience:
+        if epoch + 1 >= args.min_epochs_before_early_stop and args.early_stop_patience > 0 and early_stop_wait >= args.early_stop_patience:
             logger.info(
                 "Early stopping triggered at epoch %d (wait=%d, best_ema=%.4f)",
                 epoch + 1, early_stop_wait, best_ema_val_mae,

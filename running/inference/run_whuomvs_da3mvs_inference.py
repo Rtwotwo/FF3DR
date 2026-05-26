@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Iterable
 
 import cv2
+import Imath
+import OpenEXR
 import numpy as np
 import torch
 from PIL import Image
@@ -33,6 +36,7 @@ from running.training.run_train_da3mvs_whuomvs import (
     MetricScaleShift,
     build_da3_model,
 )
+from running.metrics.accumulator import DepthMetricAccumulator
 from running.utils.viz_utils import depth_to_color
 
 logger = logging.getLogger(__name__)
@@ -114,6 +118,39 @@ def _as_spatial_map(value: torch.Tensor | np.ndarray | None) -> np.ndarray | Non
     return value
 
 
+def _load_exr_depth(exr_path: Path) -> np.ndarray:
+    exr_file = OpenEXR.InputFile(str(exr_path))
+    header = exr_file.header()
+    data_window = header["dataWindow"]
+    width = data_window.max.x - data_window.min.x + 1
+    height = data_window.max.y - data_window.min.y + 1
+    pixel_type = Imath.PixelType(Imath.PixelType.FLOAT)
+    depth_bytes = exr_file.channel("Y", pixel_type)
+    return np.frombuffer(depth_bytes, dtype=np.float32).reshape(height, width).copy()
+
+
+def _load_mask(mask_path: Path | None, shape: tuple[int, int]) -> np.ndarray:
+    if mask_path is None or not mask_path.exists():
+        return np.ones(shape, dtype=np.float32)
+    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        return np.ones(shape, dtype=np.float32)
+    if mask.shape[:2] != shape:
+        mask = cv2.resize(mask, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
+    return (mask > 127).astype(np.float32)
+
+
+def _resolve_gt_paths(split: str, dataset_root: Path, area_name: str | None, camera_id: str, stem: str) -> tuple[Path | None, Path | None]:
+    if split == "test":
+        if area_name is None:
+            return None, None
+        gt_depth_path = dataset_root / "test" / area_name / "depths" / camera_id / f"{stem}.exr"
+        mask_path = dataset_root / "test" / area_name / "masks" / camera_id / f"{stem}.png"
+        return gt_depth_path, mask_path
+    gt_depth_path = dataset_root / "predict" / "GT" / "GT_Depths" / camera_id / f"{stem}.exr"
+    return gt_depth_path, None
+
+
 def _iter_image_paths(root_dir: Path) -> Iterable[Path]:
     for path in sorted(root_dir.glob("*.png")):
         yield path
@@ -177,6 +214,63 @@ def _save_depth_png(depth_map: np.ndarray, output_path: Path) -> None:
     cv2.imwrite(str(output_path), depth_color)
 
 
+def _init_metric_state() -> dict:
+    return {
+        "overall": DepthMetricAccumulator(align_mode="median"),
+        "per_area": {},
+        "per_camera": {},
+    }
+
+
+def _update_metric_state(metric_state: dict, area_name: str | None, camera_id: str, pred_depth: np.ndarray, gt_depth: np.ndarray, mask: np.ndarray | None) -> None:
+    if area_name is not None:
+        area_acc = metric_state["per_area"].setdefault(area_name, DepthMetricAccumulator(align_mode="median"))
+    else:
+        area_acc = None
+    cam_acc = metric_state["per_camera"].setdefault(camera_id, DepthMetricAccumulator(align_mode="median"))
+
+    if pred_depth.shape != gt_depth.shape:
+        pred_depth = cv2.resize(pred_depth, (gt_depth.shape[1], gt_depth.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    valid_mask = np.isfinite(pred_depth) & np.isfinite(gt_depth) & (pred_depth > 1e-8) & (gt_depth > 1e-8)
+    if mask is not None:
+        valid_mask &= mask > 0.5
+    if not np.any(valid_mask):
+        return
+
+    metric_state["overall"].update(pred_depth, gt_depth, valid_mask)
+    cam_acc.update(pred_depth, gt_depth, valid_mask)
+    if area_acc is not None:
+        area_acc.update(pred_depth, gt_depth, valid_mask)
+
+
+def _save_metric_summary(output_path: Path, dataset_root: Path, split: str, areas: list[str], metric_state: dict, align_mode: str = "median") -> Path:
+    per_area = {area_name: {"depth": metric_state["per_area"][area_name].finalize()} for area_name in sorted(metric_state["per_area"].keys())}
+    per_camera = {f"cam{cam_id}": {"depth": metric_state["per_camera"][cam_id].finalize()} for cam_id in sorted(metric_state["per_camera"].keys(), key=lambda value: (0, int(value)) if str(value).isdigit() else (1, str(value)))}
+    overall_depth = metric_state["overall"].finalize()
+    result = {
+        "model_name": "da3mvs",
+        "split": split,
+        "dataset_path": str((dataset_root / split).resolve()),
+        "camera_ids": sorted([cam_key.replace("cam", "") for cam_key in per_camera.keys()], key=lambda value: (0, int(value)) if str(value).isdigit() else (1, str(value))),
+        "camera_id": "all",
+        "align_mode": align_mode,
+        "per_camera": per_camera,
+        "per_area": per_area,
+        "overall": {"depth": overall_depth},
+    }
+
+    cam_suffix = "_".join(f"cam{cam_id}" for cam_id in result["camera_ids"])
+    area_suffix = ""
+    if areas:
+        area_suffix = "_" + "_".join(sorted(areas))
+    metrics_path = output_path / f"{split}_{cam_suffix}_da3mvs{area_suffix}_metrics.json"
+    with open(metrics_path, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, indent=2)
+    logger.info("Saved combined depth metrics to %s", metrics_path)
+    return metrics_path
+
+
 def _run_one_camera(
     model,
     image_paths: list[Path],
@@ -186,6 +280,11 @@ def _run_one_camera(
     process_res_method: str,
     batch_size: int,
     viz_max_frames: int,
+    metric_state: dict | None,
+    split: str,
+    dataset_root: Path,
+    area_name: str | None,
+    camera_id: str,
 ) -> None:
     if len(image_paths) == 0:
         return
@@ -232,6 +331,12 @@ def _run_one_camera(
             if viz_max_frames > 0 and saved >= viz_max_frames:
                 continue
             depth_map = depth_maps[idx]
+            if metric_state is not None:
+                gt_depth_path, mask_path = _resolve_gt_paths(split, dataset_root, area_name, camera_id, stem)
+                if gt_depth_path is not None and gt_depth_path.exists():
+                    gt_depth = _load_exr_depth(gt_depth_path)
+                    mask = _load_mask(mask_path, gt_depth.shape) if split == "test" else None
+                    _update_metric_state(metric_state, area_name, camera_id, depth_map, gt_depth, mask)
             _save_depth_png(depth_map, output_dir / f"{stem}_depth.png")
             saved += 1
 
@@ -254,6 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--process_res", type=int, default=518)
     parser.add_argument("--process_res_method", type=str, default="square")
+    parser.add_argument("--align_mode", type=str, default="median", choices=["none", "median"])
     parser.add_argument("--enable_viz", action="store_true", default=True)
     parser.add_argument("--viz_max_frames", type=int, default=-1, help="test split visualizes first 50 frames by shell default")
     parser.add_argument("--device", type=str, default="cuda")
@@ -280,12 +386,14 @@ def main() -> None:
     split = args.split.lower()
     viz_root = output_path / "viz" / "depth_pngs"
     viz_root.mkdir(parents=True, exist_ok=True)
+    metric_state = _init_metric_state()
+    requested_camera_ids = None if not args.camera_ids else {str(camera_id) for camera_id in args.camera_ids}
 
     if split == "predict":
         split_root = dataset_root / "predict" / "Images"
         if not split_root.exists():
             raise FileNotFoundError(f"Predict split not found: {split_root}")
-        cam_dirs = [p for p in split_root.iterdir() if p.is_dir()]
+        cam_dirs = [p for p in split_root.iterdir() if p.is_dir() and (requested_camera_ids is None or p.name in requested_camera_ids)]
         for cam_dir in sorted(cam_dirs, key=_camera_sort_key):
             image_paths = list(_iter_image_paths(cam_dir))
             if len(image_paths) == 0:
@@ -301,6 +409,11 @@ def main() -> None:
                 process_res_method=args.process_res_method,
                 batch_size=args.batch_size,
                 viz_max_frames=args.viz_max_frames,
+                metric_state=metric_state,
+                split=split,
+                dataset_root=dataset_root,
+                area_name=None,
+                camera_id=cam_dir.name,
             )
     else:
         for area_name in args.areas:
@@ -308,7 +421,7 @@ def main() -> None:
             if not area_root.exists():
                 logger.warning("Missing test area: %s", area_root)
                 continue
-            cam_dirs = [p for p in area_root.iterdir() if p.is_dir()]
+            cam_dirs = [p for p in area_root.iterdir() if p.is_dir() and (requested_camera_ids is None or p.name in requested_camera_ids)]
             for cam_dir in sorted(cam_dirs, key=_camera_sort_key):
                 image_paths = list(_iter_image_paths(cam_dir))
                 if len(image_paths) == 0:
@@ -324,7 +437,17 @@ def main() -> None:
                     process_res_method=args.process_res_method,
                     batch_size=args.batch_size,
                     viz_max_frames=50 if args.viz_max_frames < 0 else args.viz_max_frames,
+                    metric_state=metric_state,
+                    split=split,
+                    dataset_root=dataset_root,
+                    area_name=area_name,
+                    camera_id=cam_dir.name,
                 )
+
+    if metric_state["per_camera"]:
+        if args.align_mode != "median":
+            logger.warning("DA3MVS metrics are currently standardized to median alignment for comparability; requested align_mode=%s will be reflected only in metadata.", args.align_mode)
+        _save_metric_summary(output_path, dataset_root, split, args.areas if split == "test" else [], metric_state, align_mode="median")
 
     logger.info("Done. Visualizations saved to: %s", viz_root)
 

@@ -11,7 +11,7 @@
 #   EVAL_RECON      : true/false (是否计算重建指标)
 #   GPU_ID          : CUDA visible device id
 
-SPLIT="${SPLIT:-test}"
+SPLIT="${SPLIT:-predict}"
 MODEL="depthanything3"
 # 默认使用你提供的微调最佳权重路径
 LORA_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/whu-omvs/train_lora_da3/da3_large_lora_whuomvs_0523/checkpoints/best.pt"
