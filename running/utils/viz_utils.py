@@ -15,6 +15,9 @@ def depth_to_color(depth_map, vmin=None, vmax=None, cmap=cv2.COLORMAP_TURBO):
     if depth_map is None:
         return None
     depth = np.asarray(depth_map, dtype=np.float32)
+    depth = np.squeeze(depth)
+    if depth.ndim > 2:
+        depth = depth[..., 0]
     h, w = depth.shape[:2]
     valid = np.isfinite(depth) & (depth > 0)
     if not np.any(valid):
@@ -29,8 +32,7 @@ def depth_to_color(depth_map, vmin=None, vmax=None, cmap=cv2.COLORMAP_TURBO):
     color_rgb = cm.viridis(norm)[:, :, :3]
     color = (color_rgb[:, :, ::-1] * 255.0).astype(np.uint8)
     # set invalid pixels to black
-    color[~valid] = 0
-    return color
+    return np.where(valid[..., None], color, 0)
 
 
 def conf_to_color(conf_map, vmin=0.0, vmax=1.0, cmap=cv2.COLORMAP_JET):
@@ -38,6 +40,9 @@ def conf_to_color(conf_map, vmin=0.0, vmax=1.0, cmap=cv2.COLORMAP_JET):
     if conf_map is None:
         return None
     conf = np.asarray(conf_map, dtype=np.float32)
+    conf = np.squeeze(conf)
+    if conf.ndim > 2:
+        conf = conf[..., 0]
     h, w = conf.shape[:2]
     valid = np.isfinite(conf)
     if not np.any(valid):
@@ -45,8 +50,7 @@ def conf_to_color(conf_map, vmin=0.0, vmax=1.0, cmap=cv2.COLORMAP_JET):
     norm = np.clip((conf - vmin) / (vmax - vmin + 1e-10), 0.0, 1.0)
     norm_uint8 = (norm * 255.0).astype(np.uint8)
     color = cv2.applyColorMap(norm_uint8, cmap)
-    color[~valid] = 0
-    return color
+    return np.where(valid[..., None], color, 0)
 
 
 def overlay_depth_on_rgb(rgb_bgr, depth_color_bgr, alpha=0.5):

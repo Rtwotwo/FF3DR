@@ -15,12 +15,12 @@ SPLIT="${SPLIT:-test}"
 MODEL="depthanything3"
 # 默认使用你提供的微调最佳权重路径
 LORA_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/whu-omvs/train_lora_da3/da3_large_lora_whuomvs_0523/checkpoints/best.pt"
-AREAS="area2 area3"
+AREAS="${AREAS:-area2 area3}"
 # 我们只关心深度指标，禁用 DSM/normal/recon 相关评估
 EVAL_DSM=false
 EVAL_NORMAL=false
 EVAL_RECON=false
-GPU_ID=6
+GPU_ID="${GPU_ID:-6}"
 
 VIEW_NUM=5
 BATCH_SIZE=8
@@ -108,8 +108,12 @@ run_one_split() {
 	local run_output_folder="$1"
 	local viz_root="$2"
 	local area_arg="$3"
+	local save_adamvs_format_flag="${4:-true}"
 	local adamvs_output_path="${run_output_folder}/adamvs_output"
-	local metric_args=("${ARGS[@]}" --output_path "${run_output_folder}" --adamvs_output_path "${adamvs_output_path}" --save_adamvs_format)
+	local metric_args=("${ARGS[@]}" --output_path "${run_output_folder}")
+	if [[ "${save_adamvs_format_flag}" == "true" ]]; then
+		metric_args+=(--adamvs_output_path "${adamvs_output_path}" --save_adamvs_format)
+	fi
 	if [[ -n "${area_arg}" ]]; then
 		metric_args+=(--areas "${area_arg}")
 	fi
@@ -171,11 +175,23 @@ print(f"[INFO] depth visualizations saved to: {viz_root}")
 PY
 }
 
+run_combined_metrics_only() {
+	local run_output_folder="$1"
+	local area_args=("${@:2}")
+	local metric_args=("${ARGS[@]}" --output_path "${run_output_folder}")
+	if [[ ${#area_args[@]} -gt 0 ]]; then
+		metric_args+=(--areas "${area_args[@]}")
+	fi
+
+	CUDA_VISIBLE_DEVICES=$GPU_ID python3 "${PROJECT_ROOT}/running/inference/run_whuomvs_dsm_metric_inference.py" "${metric_args[@]}"
+}
+
 if [[ "${SPLIT}" == "predict" ]]; then
 	run_one_split "${OUTPUT_FOLDER}" "${OUTPUT_FOLDER}/viz_predict" ""
 else
+	run_combined_metrics_only "${OUTPUT_FOLDER}" area2 area3
 	for AREA in ${AREAS}; do
-		run_one_split "${OUTPUT_FOLDER}/${AREA}" "${OUTPUT_FOLDER}/viz_test/${AREA}" "${AREA}"
+		run_one_split "${OUTPUT_FOLDER}/${AREA}" "${OUTPUT_FOLDER}/viz_test/${AREA}" "${AREA}" true
 	done
 fi
 

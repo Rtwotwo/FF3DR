@@ -519,6 +519,13 @@ class DeConv2dFuse(nn.Module):
 
     def forward(self, x_pre, x):
         x = self.deconv(x)
+        if x.shape[-2:] != x_pre.shape[-2:]:
+            target_h = max(x.shape[-2], x_pre.shape[-2])
+            target_w = max(x.shape[-1], x_pre.shape[-1])
+            if x.shape[-2] != target_h or x.shape[-1] != target_w:
+                x = F.pad(x, (0, target_w - x.shape[-1], 0, target_h - x.shape[-2]))
+            if x_pre.shape[-2] != target_h or x_pre.shape[-1] != target_w:
+                x_pre = F.pad(x_pre, (0, target_w - x_pre.shape[-1], 0, target_h - x_pre.shape[-2]))
         x = torch.cat((x, x_pre), dim=1)
         x = self.conv(x)
         return x

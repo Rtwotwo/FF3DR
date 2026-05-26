@@ -9,13 +9,13 @@
 #   EVAL_METRICS    : true/false (是否计算指标)
 #   GPU_ID          : CUDA visible device id
 
-SPLIT="predict"
+SPLIT="${SPLIT:-predict}"
 MODEL="adamvs"
 LOADCKPT="/data2/dataset/Redal/work_feedforward_3drepo/weights/adamvs/adamvs_whuomvs/model_000019_0.1339.ckpt"
-AREAS="area2 area3"
+AREAS="${AREAS:-area2 area3}"
 EVAL_METRICS=true
 DISPLAY_VIZ=true
-GPU_ID=2
+GPU_ID="${GPU_ID:-5}"
 TEST_MAX_SAMPLES_PER_CAMERA=-1
 ADAMVS_TEST_MAX_SAMPLES_PER_CAMERA=20
 ALIGN_MODE="median"
