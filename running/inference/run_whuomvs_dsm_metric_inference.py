@@ -275,7 +275,7 @@ class PredictMetricInfer:
       - mean angular error, median angular error
     """
 
-    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None, adamvs_ckpt=None, adamvs_test_max_samples_per_camera=20, split="predict", areas=None):
+    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None, adamvs_ckpt=None, adamvs_test_max_samples_per_camera=20, split="predict", areas=None):
         self.cfg = cfg
         self.dataset_path = Path(dataset_path)
         self.split = split
@@ -288,6 +288,7 @@ class PredictMetricInfer:
         self.eval_dsm = eval_dsm
         self.save_adamvs_format = save_adamvs_format
         self.adamvs_output_path = Path(adamvs_output_path) if adamvs_output_path else None
+        self.output_path = Path(output_path) if output_path else None
         self.depth_align_method = depth_align_method
         self.multiview_num_neighbors = int(multiview_num_neighbors)
         self.multiview_process_res = int(multiview_process_res)
@@ -1316,7 +1317,12 @@ class PredictMetricInfer:
 
     def _run_adamvs_via_legacy(self):
         legacy_script = _REPO_ROOT / "running" / "inference" / "run_whuomvs_adamvs_predict.py"
-        output_folder = _REPO_ROOT / "exp" / "whu-omvs" / "metric_adamvs_unified_{}".format(self.split)
+        if self.adamvs_output_path is not None:
+            output_folder = self.adamvs_output_path
+        elif self.output_path is not None:
+            output_folder = self.output_path
+        else:
+            output_folder = _REPO_ROOT / "exp" / "whu-omvs" / "metric_adamvs_unified_{}".format(self.split)
         output_folder.mkdir(parents=True, exist_ok=True)
 
         cmd = [
@@ -1805,6 +1811,7 @@ def main():
         eval_dsm=eval_dsm,
         save_adamvs_format=args.save_adamvs_format,
         adamvs_output_path=adamvs_output_path,
+        output_path=str(output_path),
         depth_align_method=args.depth_align_method,
         multiview_num_neighbors=args.multiview_num_neighbors,
         multiview_process_res=args.multiview_process_res,

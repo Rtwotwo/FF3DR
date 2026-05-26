@@ -15,7 +15,7 @@ LOADCKPT="/data2/dataset/Redal/work_feedforward_3drepo/weights/adamvs/adamvs_whu
 AREAS="area2 area3"
 EVAL_METRICS=true
 DISPLAY_VIZ=true
-GPU_ID=3
+GPU_ID=2
 TEST_MAX_SAMPLES_PER_CAMERA=-1
 ADAMVS_TEST_MAX_SAMPLES_PER_CAMERA=20
 ALIGN_MODE="median"
@@ -117,6 +117,15 @@ fi
 if [[ "${DISPLAY_VIZ}" == "true" ]]; then
     ADAMVS_OUT_DIR="${OUTPUT_FOLDER}/adamvs_output"
     VIZ_OUT_DIR="${OUTPUT_FOLDER}/viz/depth_pngs"
+
+    # Legacy Ada-MVS path writes camera folders directly under OUTPUT_FOLDER.
+    if [[ ! -d "${ADAMVS_OUT_DIR}" ]]; then
+        if find "${OUTPUT_FOLDER}" -maxdepth 1 -mindepth 1 -type d -regex '.*/[0-9]+' | grep -q .; then
+            ADAMVS_OUT_DIR="${OUTPUT_FOLDER}"
+            echo "[INFO] Using legacy Ada-MVS output layout: ${ADAMVS_OUT_DIR}"
+        fi
+    fi
+
     echo "[INFO] Converting PFMs in ${ADAMVS_OUT_DIR} -> ${VIZ_OUT_DIR}"
     python3 - <<PY
 import os
@@ -134,7 +143,7 @@ if not in_dir.exists():
     raise SystemExit(0)
 for root, _, files in os.walk(in_dir):
     for fn in files:
-        if fn.endswith('.pfm'):
+        if fn.endswith('_init.pfm'):
             src = Path(root) / fn
             rel = src.relative_to(in_dir)
             dst_dir = out_dir / rel.parent

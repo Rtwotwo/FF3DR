@@ -20,7 +20,7 @@ AREAS="area2 area3"
 EVAL_DSM=false
 EVAL_NORMAL=false
 EVAL_RECON=false
-GPU_ID=5
+GPU_ID=6
 
 VIEW_NUM=5
 BATCH_SIZE=8
@@ -127,11 +127,11 @@ from pathlib import Path
 import sys
 import numpy as np
 import cv2
-import matplotlib.cm as cm
 
 repo_root = Path("${PROJECT_ROOT}")
 sys.path.insert(0, str(repo_root))
 from running.training.datasets_adamvs.data_io import read_pfm
+from running.utils.viz_utils import depth_to_color
 
 adamvs_output = Path("${adamvs_output_path}")
 viz_root = Path("${viz_root}")
@@ -139,22 +139,6 @@ split_name = "${SPLIT}"
 area_name = "${area_arg}"
 model_name = "${MODEL}"
 camera_ids = ["${CAMERA_IDS[0]}", "${CAMERA_IDS[1]}", "${CAMERA_IDS[2]}", "${CAMERA_IDS[3]}", "${CAMERA_IDS[4]}"]
-
-def depth_to_color(depth_map):
-    depth = np.asarray(depth_map, dtype=np.float32)
-    valid = np.isfinite(depth) & (depth > 0)
-    h, w = depth.shape[:2]
-    if not np.any(valid):
-        return np.zeros((h, w, 3), dtype=np.uint8)
-    depth_min = float(depth[valid].min())
-    depth_max = float(depth[valid].max())
-    if depth_max <= depth_min:
-        depth_max = depth_min + 1e-6
-    depth_norm = np.clip((depth - depth_min) / (depth_max - depth_min), 0.0, 1.0)
-    depth_rgb = cm.viridis(depth_norm)[:, :, :3]
-    depth_bgr = (depth_rgb[:, :, ::-1] * 255.0).astype(np.uint8)
-    depth_bgr[~valid] = 0
-    return depth_bgr
 
 if not adamvs_output.exists():
     print(f"[WARN] missing adamvs output dir: {adamvs_output}")

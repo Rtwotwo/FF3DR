@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 DATASET_ROOT="${PROJECT_ROOT}/dataset/WHU-OMVS"
-OUTPUT_DIR="${PROJECT_ROOT}/exp/whu-omvs/train_da3mvs/da3_large_adamvs_fusion_0524"
+OUTPUT_DIR="${PROJECT_ROOT}/exp/whu-omvs/train_da3mvs/da3_large_adamvs_fusion_0526"
 MODEL_NAME="da3-large"
 PRETRAINED_PATH=""
 ADAMVS_CKPT="${PROJECT_ROOT}/weights/adamvs/adamvs_whuomvs/model_000019_0.1339.ckpt"

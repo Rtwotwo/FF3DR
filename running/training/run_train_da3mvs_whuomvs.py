@@ -171,7 +171,7 @@ def _extract_adamvs_feature_state(state_dict: Dict[str, torch.Tensor]) -> Dict[s
 
 
 class AdaMVSFeatureEncoder(nn.Module):
-    def __init__(self, ckpt_path: Optional[str], stage_key: str = "stage3"):
+    def __init__(self, ckpt_path: Optional[str], stage_key: str = "stage3", trainable: bool = False):
         super().__init__()
         self.stage_key = stage_key
         self.feature = FeatureNet0(base_channels=8, stride=4, num_stage=3)
@@ -189,13 +189,17 @@ class AdaMVSFeatureEncoder(nn.Module):
         else:
             logger.warning("Ada-MVS checkpoint not found, using random feature encoder: %s", ckpt_path)
 
+        # Control whether Ada-MVS encoder parameters are trainable.
+        self.trainable = bool(trainable)
         for p in self.feature.parameters():
-            p.requires_grad = False
-        self.feature.eval()
+            p.requires_grad = self.trainable
 
     def forward(self, image_b3hw: torch.Tensor) -> torch.Tensor:
-        self.feature.eval()
-        with torch.no_grad():
+        if not self.trainable:
+            # keep inference-only fast path when encoder is frozen
+            with torch.no_grad():
+                feat_dict = self.feature(image_b3hw)
+        else:
             feat_dict = self.feature(image_b3hw)
         if self.stage_key not in feat_dict:
             raise KeyError(f"Ada-MVS feature stage '{self.stage_key}' not found. keys={list(feat_dict.keys())}")
@@ -242,6 +246,57 @@ class DA3MVSFusionHead(nn.Module):
             "fusion_delta": delta,
             "fusion_gate": gate,
         }
+
+
+class LayerAttentionFusionHead(nn.Module):
+    """Lightweight channel-wise layer attention fusion.
+
+    Combines DA3 pre-head and Ada-MVS features via channel attention computed
+    from global pooled contexts. Designed to be parameter-efficient and
+    trainable jointly with Ada-MVS when requested.
+    """
+    def __init__(self, da3_in_dim: int, ada_in_dim: int, fusion_dim: int = 128, hidden: int = 64):
+        super().__init__()
+        self.da3_proj = nn.Conv2d(da3_in_dim, fusion_dim, kernel_size=1)
+        self.ada_proj = nn.Conv2d(ada_in_dim, fusion_dim, kernel_size=1)
+
+        # channel attention MLP
+        self.att_fc = nn.Sequential(
+            nn.Linear(fusion_dim * 2, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, fusion_dim),
+        )
+
+        self.refine = nn.Sequential(
+            nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.delta_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
+        self.gate_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
+
+    def forward(self, da3_pre_head_feat: torch.Tensor, adamvs_feat: torch.Tensor, base_metric_depth: torch.Tensor):
+        target_hw = da3_pre_head_feat.shape[-2:]
+        if adamvs_feat.shape[-2:] != target_hw:
+            adamvs_feat = F.interpolate(adamvs_feat, size=target_hw, mode="bilinear", align_corners=True)
+
+        da3_p = self.da3_proj(da3_pre_head_feat)
+        ada_p = self.ada_proj(adamvs_feat)
+
+        # global pooling
+        da3_g = da3_p.mean(dim=[2, 3])
+        ada_g = ada_p.mean(dim=[2, 3])
+        att_input = torch.cat([da3_g, ada_g], dim=1)
+        att = torch.sigmoid(self.att_fc(att_input)).unsqueeze(-1).unsqueeze(-1)
+
+        fused = da3_p * (1.0 + att) + ada_p * att
+        fused = self.refine(fused)
+
+        delta = self.delta_head(fused).squeeze(1)
+        gate = torch.sigmoid(self.gate_head(fused).squeeze(1))
+        fused_metric = torch.clamp(base_metric_depth + gate * delta, min=1e-3)
+        return fused_metric, {"fusion_delta": delta, "fusion_gate": gate}
 
 
 class DA3MVSForMetricDepth(nn.Module):
@@ -651,7 +706,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
     return metrics
 
 
-def set_phase_grads(model, phase):
+def set_phase_grads(model, phase, train_adamvs: bool = False):
     raw = get_raw_model(model)
     da3_model = raw.da3.model
 
@@ -675,7 +730,7 @@ def set_phase_grads(model, phase):
         p.requires_grad = True
 
     for p in raw.adamvs_encoder.parameters():
-        p.requires_grad = False
+        p.requires_grad = bool(train_adamvs)
 
 
 def main():
@@ -715,6 +770,8 @@ def main():
         choices=["stage1", "stage2", "stage3"],
     )
     parser.add_argument("--fusion_dim", type=int, default=128)
+    parser.add_argument("--fusion_type", type=str, default="layer_attention", choices=["conv", "layer_attention"])
+    parser.add_argument("--train_adamvs", action="store_true", help="If set, Ada-MVS encoder parameters will be trained jointly (do not freeze)")
     parser.add_argument("--loss_profile", type=str, default="depth_only", choices=["depth_only"])
     parser.add_argument("--relative_si_weight", type=float, default=0.0)
     parser.add_argument("--metric_si_weight", type=float, default=0.0)
@@ -800,17 +857,25 @@ def main():
     adamvs_encoder = AdaMVSFeatureEncoder(
         ckpt_path=adamvs_ckpt,
         stage_key=args.adamvs_feature_stage,
+        trainable=args.train_adamvs,
     ).to(device)
     adamvs_stage_channels = {
         "stage1": 32,
         "stage2": 16,
         "stage3": 8,
     }
-    fusion_head = DA3MVSFusionHead(
-        da3_in_dim=128,
-        ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
-        fusion_dim=args.fusion_dim,
-    ).to(device)
+    if args.fusion_type == "layer_attention":
+        fusion_head = LayerAttentionFusionHead(
+            da3_in_dim=128,
+            ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
+            fusion_dim=args.fusion_dim,
+        ).to(device)
+    else:
+        fusion_head = DA3MVSFusionHead(
+            da3_in_dim=128,
+            ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
+            fusion_dim=args.fusion_dim,
+        ).to(device)
 
     model = DA3MVSForMetricDepth(da3_model, scale_shift, adamvs_encoder, fusion_head)
 
@@ -823,7 +888,7 @@ def main():
     )
     da3_model.model = da3_inner
 
-    set_phase_grads(model, 1)
+    set_phase_grads(model, 1, train_adamvs=args.train_adamvs)
 
     raw_model = get_raw_model(model)
     head_params = count_params_safe(raw_model.da3.model.head)
