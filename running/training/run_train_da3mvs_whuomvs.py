@@ -726,11 +726,15 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
 
     for batch in dataloader:
         images = batch["image"].to(device)
-        depth_gt = batch["depth_gt"].to(device)
-        valid_mask = batch["valid_mask"].to(device)
+        depth_gt = _squeeze_spatial_map(batch["depth_gt"].to(device))
+        valid_mask = _squeeze_spatial_map(batch["valid_mask"].to(device))
         images_input = images.unsqueeze(1)
 
         pred_depth, pred_metric, pred_conf, pred_sky, aux_out = raw(images_input)
+        pred_depth = _squeeze_spatial_map(pred_depth)
+        pred_metric = _squeeze_spatial_map(pred_metric)
+        pred_conf = _squeeze_spatial_map(pred_conf) if pred_conf is not None else None
+        pred_sky = _squeeze_spatial_map(pred_sky) if pred_sky is not None else None
 
         if pred_depth.shape[-2:] != depth_gt.shape[-2:]:
             pred_depth = F.interpolate(
@@ -772,14 +776,14 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
             logged_depth_images = True
             n_vis = min(images.shape[0], 2)
             for vi in range(n_vis):
-                gt_vis = depth_gt[vi].cpu().numpy()
-                pred_vis = pred_metric[vi].cpu().numpy()
-                mask_vis = valid_mask[vi].cpu().numpy().astype(bool)
-                if gt_vis.ndim == 3 and gt_vis.shape[0] == 1:
+                gt_vis = np.asarray(depth_gt[vi].detach().cpu().numpy(), dtype=np.float32)
+                pred_vis = np.asarray(pred_metric[vi].detach().cpu().numpy(), dtype=np.float32)
+                mask_vis = np.asarray(valid_mask[vi].detach().cpu().numpy(), dtype=bool)
+                if gt_vis.ndim == 3:
                     gt_vis = gt_vis[0]
-                if pred_vis.ndim == 3 and pred_vis.shape[0] == 1:
+                if pred_vis.ndim == 3:
                     pred_vis = pred_vis[0]
-                if mask_vis.ndim == 3 and mask_vis.shape[0] == 1:
+                if mask_vis.ndim == 3:
                     mask_vis = mask_vis[0]
                 gt_valid = gt_vis[mask_vis]
                 pred_valid = pred_vis[mask_vis]
@@ -813,14 +817,14 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
                     global_step,
                 )
 
-        pred_np = pred_metric.cpu().numpy()
-        gt_np = depth_gt.cpu().numpy()
-        mask_np = valid_mask.cpu().numpy().astype(bool)
-        if pred_np.ndim == 4 and pred_np.shape[1] == 1:
+        pred_np = np.asarray(pred_metric.detach().cpu().numpy(), dtype=np.float32)
+        gt_np = np.asarray(depth_gt.detach().cpu().numpy(), dtype=np.float32)
+        mask_np = np.asarray(valid_mask.detach().cpu().numpy(), dtype=bool)
+        if pred_np.ndim == 4:
             pred_np = pred_np[:, 0]
-        if gt_np.ndim == 4 and gt_np.shape[1] == 1:
+        if gt_np.ndim == 4:
             gt_np = gt_np[:, 0]
-        if mask_np.ndim == 4 and mask_np.shape[1] == 1:
+        if mask_np.ndim == 4:
             mask_np = mask_np[:, 0]
         for i in range(pred_np.shape[0]):
             m = mask_np[i] & np.isfinite(pred_np[i]) & np.isfinite(gt_np[i]) & (gt_np[i] > 1.0)

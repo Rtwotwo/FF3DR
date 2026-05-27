@@ -1,7 +1,7 @@
 """
 python -m running.utils.depth_utils \
-  --input_dir /data2/dataset/Redal/work_feedforward_3drepo/dataset/WHU-OMVS/test/area3/depths/3 \
-  --output_dir /data2/dataset/Redal/work_feedforward_3drepo/dataset/WHU-OMVS/test/area3/depths_viz/3
+  --input_dir /data2/dataset/Redal/work_feedforward_3drepo/dataset/WHU-OMVS/predict/GT/GT_Depths/5 \
+  --output_dir /data2/dataset/Redal/work_feedforward_3drepo/dataset/WHU-OMVS/predict/GT/GT_Depths_Viz/5
 """
 from __future__ import annotations
 

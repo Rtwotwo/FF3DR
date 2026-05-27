@@ -25,7 +25,7 @@ ADAMVS_CKPT="${PROJECT_ROOT}/weights/adamvs/adamvs_whuomvs/model_000019_0.1339.c
 ADAMVS_FEATURE_STAGE="stage3"
 FUSION_DIM=128
 FUSION_TYPE="cross_attention_gated"
-GPUS="5"
+GPUS="2"
 BATCH_SIZE=4
 PROCESS_RES=504
 EPOCHS=40
@@ -165,7 +165,9 @@ mkdir -p "${OUTPUT_DIR}"
 
 if command -v conda >/dev/null 2>&1; then
 	# Ensure training uses the requested conda environment.
+	set +u
 	eval "$(conda shell.bash hook)"
+	set -u
 	conda activate depthanything
 fi
 
