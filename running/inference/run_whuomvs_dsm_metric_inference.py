@@ -275,7 +275,7 @@ class PredictMetricInfer:
       - mean angular error, median angular error
     """
 
-    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None, adamvs_ckpt=None, adamvs_test_max_samples_per_camera=20, split="predict", areas=None):
+    def __init__(self, cfg, dataset_path, camera_ids, batch_size, align_mode, eval_normal, outlier_threshold, eval_dsm=True, save_adamvs_format=False, adamvs_output_path=None, output_path=None, depth_align_method="median", multiview_num_neighbors=0, multiview_process_res=504, multiview_ref_strategy="saddle_balanced", eval_recon=False, recon_threshold=0.5, recon_stride=4, lora_checkpoint=None, adamvs_ckpt=None, da3mvs_ckpt=None, adamvs_test_max_samples_per_camera=20, split="predict", areas=None):
         self.cfg = cfg
         self.dataset_path = Path(dataset_path)
         self.split = split
@@ -298,6 +298,7 @@ class PredictMetricInfer:
         self.recon_stride = int(recon_stride)
         self.lora_checkpoint = lora_checkpoint
         self.adamvs_ckpt = adamvs_ckpt
+        self.da3mvs_ckpt = da3mvs_ckpt
         self.adamvs_test_max_samples_per_camera = int(adamvs_test_max_samples_per_camera)
         self._metric_scale = None
         self._metric_shift = None
@@ -310,6 +311,8 @@ class PredictMetricInfer:
         if self.model_name == "adamvs":
             self.model = None
             logger.info("[INFO] model_name=adamvs, using delegated Ada-MVS inference backend")
+        elif self.model_name == "da3mvs":
+            self.model = self._load_da3mvs_model()
         else:
             self.model = self._load_model()
 
@@ -388,8 +391,70 @@ class PredictMetricInfer:
             state_dict = torch.load(vggt_weight_path, map_location=self.device)
             if isinstance(state_dict, dict):
                 model.load_state_dict(state_dict, strict=False)
+        elif self.model_name == "da3mvs":
+            raise RuntimeError("[ERROR] model_name=da3mvs is handled by _load_da3mvs_model()")
         else:
-            raise RuntimeError("[ERROR] model_name must be one of depthanything3/mapanything/pi3/vggt/adamvs")
+            raise RuntimeError("[ERROR] model_name must be one of depthanything3/mapanything/pi3/vggt/adamvs/da3mvs")
+        model.eval().to(self.device)
+        logger.info("[INFO] Model loaded: %s", self.model_name)
+        return model
+
+    def _load_da3mvs_model(self):
+        from running.training.run_train_da3mvs_whuomvs import (
+            AdaMVSFeatureEncoder,
+            DA3MVSForMetricDepth,
+            DA3MVSFusionHead,
+            LayerAttentionFusionHead,
+            MetricScaleShift,
+            build_da3_model,
+        )
+
+        if self.da3mvs_ckpt is None:
+            raise RuntimeError("[ERROR] model_name=da3mvs requires --da3mvs_checkpoint")
+
+        ckpt_path = _resolve_path(self.da3mvs_ckpt)
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        ckpt_args = ckpt.get("args", {})
+        if not isinstance(ckpt_args, dict):
+            ckpt_args = dict(ckpt_args)
+
+        model_name = ckpt_args.get("model_name", "da3-large")
+        pretrained_path = ckpt_args.get("pretrained_path", None)
+        adamvs_ckpt = ckpt_args.get("adamvs_ckpt", None)
+        adamvs_feature_stage = ckpt_args.get("adamvs_feature_stage", "stage3")
+        fusion_dim = int(ckpt_args.get("fusion_dim", 128))
+        fusion_type = ckpt_args.get("fusion_type", "layer_attention")
+        train_adamvs = bool(ckpt_args.get("train_adamvs", False))
+
+        da3_model = build_da3_model(model_name=model_name, pretrained_path=pretrained_path)
+        scale_shift = MetricScaleShift(init_scale=1.0, init_shift=0.0)
+        adamvs_encoder = AdaMVSFeatureEncoder(
+            ckpt_path=_resolve_path(adamvs_ckpt),
+            stage_key=adamvs_feature_stage,
+            trainable=train_adamvs,
+        )
+        adamvs_stage_channels = {"stage1": 32, "stage2": 16, "stage3": 8}
+        ada_in_dim = adamvs_stage_channels.get(adamvs_feature_stage, 8)
+        if fusion_type == "layer_attention":
+            fusion_head = LayerAttentionFusionHead(
+                da3_in_dim=128,
+                ada_in_dim=ada_in_dim,
+                fusion_dim=fusion_dim,
+            )
+        else:
+            fusion_head = DA3MVSFusionHead(
+                da3_in_dim=128,
+                ada_in_dim=ada_in_dim,
+                fusion_dim=fusion_dim,
+            )
+
+        model = DA3MVSForMetricDepth(da3_model, scale_shift, adamvs_encoder, fusion_head)
+        missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        if missing:
+            logger.warning("[WARN] Missing keys when loading DA3MVS checkpoint (%d): %s", len(missing), missing[:5])
+        if unexpected:
+            logger.warning("[WARN] Unexpected keys when loading DA3MVS checkpoint (%d): %s", len(unexpected), unexpected[:5])
+
         model.eval().to(self.device)
         logger.info("[INFO] Model loaded: %s", self.model_name)
         return model
@@ -624,6 +689,8 @@ class PredictMetricInfer:
             return self._predict_batch_vggt(image_paths)
         if self.model_name == "depthanything3" and self.multiview_num_neighbors > 0:
             return self._predict_batch_da3_single(image_paths)
+        if self.model_name == "da3mvs":
+            return self._predict_batch_da3mvs(image_paths)
 
         with torch.no_grad():
             if torch.cuda.is_available():
@@ -849,6 +916,51 @@ class PredictMetricInfer:
             confs = np.stack(conf_list, axis=0)
         depths = self._apply_metric_scale_shift(depths)
         return {"depth": depths, "conf": confs}
+
+    def _predict_batch_da3mvs(self, image_paths):
+        images = []
+        for image_path in image_paths:
+            img = Image.open(str(image_path)).convert("RGB")
+            img = img.resize((self.multiview_process_res, self.multiview_process_res), Image.Resampling.BICUBIC)
+            arr = np.asarray(img, dtype=np.float32) / 255.0
+            images.append(torch.from_numpy(arr).permute(2, 0, 1).contiguous())
+
+        images_tensor = torch.stack(images, dim=0).to(self.device)
+        images_input = images_tensor.unsqueeze(1)
+
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.amp.autocast("cuda", dtype=self.dtype):
+                    pred_depth, pred_metric, pred_conf, pred_sky, aux = self.model(images_input)
+            else:
+                pred_depth, pred_metric, pred_conf, pred_sky, aux = self.model(images_input)
+
+        depth = pred_metric
+        if isinstance(depth, torch.Tensor):
+            depth = depth.detach().cpu().numpy()
+        else:
+            depth = np.asarray(depth)
+        if depth.ndim == 4 and depth.shape[1] >= 1:
+            depth = depth[:, 0]
+        if depth.ndim == 3 and depth.shape[-1] == 1:
+            depth = depth[..., 0]
+
+        conf = pred_conf
+        if conf is not None:
+            if isinstance(conf, torch.Tensor):
+                conf = conf.detach().cpu().numpy()
+            else:
+                conf = np.asarray(conf)
+            if conf.ndim == 4 and conf.shape[1] >= 1:
+                conf = conf[:, 0]
+            if conf.ndim == 3 and conf.shape[-1] == 1:
+                conf = conf[..., 0]
+            if conf.ndim != 3 and conf.ndim != 2:
+                conf = None
+            if conf is not None and conf.ndim == 3 and conf.shape[1] >= 1:
+                conf = conf[:, 0]
+
+        return {"depth": depth, "conf": conf}
 
     def _predict_da3_multiview(self, target_samples, all_samples_for_cam):
         if self._name_to_params is None:
@@ -1716,8 +1828,14 @@ def parse_args():
         "--model_name",
         type=str,
         default=None,
-        choices=["depthanything3", "mapanything", "pi3", "vggt", "adamvs"],
+        choices=["depthanything3", "mapanything", "pi3", "vggt", "adamvs", "da3mvs"],
         help="Model name override. If provided, it supersedes Model.name in config.",
+    )
+    parser.add_argument(
+        "--da3mvs_checkpoint",
+        type=str,
+        default=None,
+        help="Path to DA3MVS fused checkpoint (.pt). Required when model_name=da3mvs.",
     )
     parser.add_argument(
         "--adamvs_ckpt",
@@ -1821,6 +1939,7 @@ def main():
         recon_stride=args.recon_stride,
         lora_checkpoint=args.lora_checkpoint,
         adamvs_ckpt=args.adamvs_ckpt,
+        da3mvs_ckpt=args.da3mvs_checkpoint,
         adamvs_test_max_samples_per_camera=args.adamvs_test_max_samples_per_camera,
         split=split,
         areas=args.areas,
