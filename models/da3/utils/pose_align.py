@@ -15,9 +15,8 @@
 from typing import List
 import numpy as np
 import torch
-from evo.core.trajectory import PosePath3D
 
-from depth_anything_3.utils.geometry import affine_inverse, affine_inverse_np
+from da3.utils.geometry import affine_inverse, affine_inverse_np
 
 
 def batch_apply_alignment_to_enc(
@@ -62,7 +61,7 @@ def batch_align_poses_umeyama(ext_ref: torch.Tensor, ext_est: torch.Tensor):
     return torch.stack(rots), torch.stack(trans), torch.stack(scales)
 
 
-# Dependencies: affine_inverse_np, PosePath3D (maintain consistency with your existing project)
+# Dependencies: affine_inverse_np (maintain consistency with your existing project)
 
 
 def _to44(ext):
@@ -82,10 +81,38 @@ def _poses_from_ext(ext_ref, ext_est):
 
 
 def _umeyama_sim3_from_paths(pose_ref, pose_est):
-    path_ref = PosePath3D(poses_se3=pose_ref.copy())
-    path_est = PosePath3D(poses_se3=pose_est.copy())
-    r, t, s = path_est.align(path_ref, correct_scale=True)
-    pose_est_aligned = np.stack(path_est.poses_se3)
+    """Estimate Sim(3) that maps pose_est camera centers onto pose_ref centers.
+
+    This is a pure NumPy fallback that avoids the optional evo dependency.
+    """
+    pts_ref = pose_ref[:, :3, 3]
+    pts_est = pose_est[:, :3, 3]
+    if pts_ref.shape[0] < 2:
+        r = np.eye(3, dtype=pose_ref.dtype)
+        t = np.zeros(3, dtype=pose_ref.dtype)
+        s = np.array(1.0, dtype=pose_ref.dtype)
+        return r, t, s, pose_est.copy()
+
+    mu_ref = pts_ref.mean(axis=0)
+    mu_est = pts_est.mean(axis=0)
+    x = pts_est - mu_est
+    y = pts_ref - mu_ref
+
+    cov = (y.T @ x) / float(pts_ref.shape[0])
+    u, singular_values, vt = np.linalg.svd(cov)
+
+    correction = np.eye(3, dtype=pose_ref.dtype)
+    if np.linalg.det(u @ vt) < 0:
+        correction[-1, -1] = -1.0
+
+    r = u @ correction @ vt
+    var_x = np.mean(np.sum(x * x, axis=1)).clip(min=1e-12)
+    s = float(np.sum(singular_values * np.diag(correction)) / var_x)
+    t = mu_ref - s * (r @ mu_est)
+
+    pose_est_aligned = pose_est.copy()
+    pose_est_aligned[:, :3, :3] = np.einsum("ij,bjk->bik", r, pose_est[:, :3, :3])
+    pose_est_aligned[:, :3, 3] = s * (pose_est[:, :3, 3] @ r.T) + t
     return r, t, s, pose_est_aligned
 
 

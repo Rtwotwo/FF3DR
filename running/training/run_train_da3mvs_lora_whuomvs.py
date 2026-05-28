@@ -259,24 +259,24 @@ class DA3MVSFusionHead(nn.Module):
         }
 
 
-class LayerAttentionFusionHead(nn.Module):
-    """Lightweight channel-wise layer attention fusion.
+class CrossAttentionFusionHead(nn.Module):
+    """Cross-attention fusion for DA3 pre-head and frozen Ada-MVS features.
 
-    Combines DA3 pre-head and Ada-MVS features via channel attention computed
-    from global pooled contexts. Designed to be parameter-efficient and
-    trainable jointly with Ada-MVS when requested.
+    The DA3 feature acts as the query stream, while the Ada-MVS feature acts
+    as the key/value stream. To keep the cost bounded at WHU-OMVS resolution,
+    attention is computed on an adaptively pooled token grid and then lifted
+    back to the original feature size.
     """
-    def __init__(self, da3_in_dim: int, ada_in_dim: int, fusion_dim: int = 128, hidden: int = 64):
+
+    def __init__(self, da3_in_dim: int, ada_in_dim: int, fusion_dim: int = 128, num_heads: int = 4):
         super().__init__()
         self.da3_proj = nn.Conv2d(da3_in_dim, fusion_dim, kernel_size=1)
         self.ada_proj = nn.Conv2d(ada_in_dim, fusion_dim, kernel_size=1)
 
-        # channel attention MLP
-        self.att_fc = nn.Sequential(
-            nn.Linear(fusion_dim * 2, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, fusion_dim),
-        )
+        self.da3_to_ada_attn = nn.MultiheadAttention(fusion_dim, num_heads=num_heads, batch_first=True)
+        self.ada_to_da3_attn = nn.MultiheadAttention(fusion_dim, num_heads=num_heads, batch_first=True)
+        self.da3_norm = nn.LayerNorm(fusion_dim)
+        self.ada_norm = nn.LayerNorm(fusion_dim)
 
         self.refine = nn.Sequential(
             nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
@@ -292,6 +292,10 @@ class LayerAttentionFusionHead(nn.Module):
         nn.init.zeros_(self.gate_head.weight)
         nn.init.constant_(self.gate_head.bias, -2.0)
 
+    def _attn_hw(self, target_hw: Tuple[int, int]) -> Tuple[int, int]:
+        h, w = target_hw
+        return max(8, h // 4), max(8, w // 4)
+
     def forward(self, da3_pre_head_feat: torch.Tensor, adamvs_feat: torch.Tensor, base_metric_depth: torch.Tensor):
         target_hw = da3_pre_head_feat.shape[-2:]
         if adamvs_feat.shape[-2:] != target_hw:
@@ -300,19 +304,35 @@ class LayerAttentionFusionHead(nn.Module):
         da3_p = self.da3_proj(da3_pre_head_feat)
         ada_p = self.ada_proj(adamvs_feat)
 
-        # global pooling
-        da3_g = da3_p.mean(dim=[2, 3])
-        ada_g = ada_p.mean(dim=[2, 3])
-        att_input = torch.cat([da3_g, ada_g], dim=1)
-        att = torch.sigmoid(self.att_fc(att_input)).unsqueeze(-1).unsqueeze(-1)
+        att_h, att_w = self._attn_hw(target_hw)
+        da3_tokens = F.adaptive_avg_pool2d(da3_p, (att_h, att_w)).flatten(2).transpose(1, 2)
+        ada_tokens = F.adaptive_avg_pool2d(ada_p, (att_h, att_w)).flatten(2).transpose(1, 2)
 
-        fused = da3_p * (1.0 + att) + ada_p * att
-        fused = self.refine(fused)
+        da3_q = self.da3_norm(da3_tokens)
+        ada_kv = self.ada_norm(ada_tokens)
+        da3_ctx, _ = self.da3_to_ada_attn(da3_q, ada_kv, ada_kv, need_weights=False)
+
+        ada_q = self.ada_norm(ada_tokens)
+        da3_kv = self.da3_norm(da3_tokens)
+        ada_ctx, _ = self.ada_to_da3_attn(ada_q, da3_kv, da3_kv, need_weights=False)
+
+        da3_ctx = da3_ctx.transpose(1, 2).reshape(da3_p.shape[0], -1, att_h, att_w)
+        ada_ctx = ada_ctx.transpose(1, 2).reshape(ada_p.shape[0], -1, att_h, att_w)
+        cross_ctx = 0.5 * (da3_ctx + ada_ctx)
+        cross_ctx = F.interpolate(cross_ctx, size=target_hw, mode="bilinear", align_corners=True)
+
+        fused = self.refine(da3_p + cross_ctx)
 
         delta = self.delta_head(fused).squeeze(1)
         gate = torch.sigmoid(self.gate_head(fused).squeeze(1))
         fused_metric = torch.clamp(base_metric_depth + gate * delta, min=1e-3)
         return fused_metric, {"fusion_delta": delta, "fusion_gate": gate}
+
+
+class LayerAttentionFusionHead(CrossAttentionFusionHead):
+    """Backward-compatible alias for the cross-attention fusion head."""
+
+    pass
 
 
 class DA3MVSForMetricDepth(nn.Module):
@@ -814,7 +834,7 @@ def main():
         choices=["stage1", "stage2", "stage3"],
     )
     parser.add_argument("--fusion_dim", type=int, default=128)
-    parser.add_argument("--fusion_type", type=str, default="layer_attention", choices=["conv", "layer_attention"])
+    parser.add_argument("--fusion_type", type=str, default="cross_attention", choices=["conv", "cross_attention", "layer_attention"])
     parser.add_argument("--train_adamvs", action="store_true", help="Reserved; Ada-MVS encoder stays frozen in this single-view fusion recipe")
     parser.add_argument("--train_da3_core", action="store_true", help="If set, DA3 head/cam/LoRA parameters remain trainable even when warm-starting from a LoRA checkpoint")
     parser.add_argument("--loss_profile", type=str, default="metric_v4", choices=["metric_v4"])
@@ -909,8 +929,8 @@ def main():
         "stage2": 16,
         "stage3": 8,
     }
-    if args.fusion_type == "layer_attention":
-        fusion_head = LayerAttentionFusionHead(
+    if args.fusion_type in {"cross_attention", "layer_attention"}:
+        fusion_head = CrossAttentionFusionHead(
             da3_in_dim=128,
             ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
             fusion_dim=args.fusion_dim,
@@ -1043,7 +1063,7 @@ def main():
     logger.info("  Epochs: %d (single-stage metric fusion)", args.epochs)
     logger.info("  LR: %.2e, Warmup: %d steps, Grad accum: %d",
                 args.lr, warmup_steps, args.grad_accum_steps)
-    logger.info("  Loss profile: %s | DA3 pre-head + Ada-MVS(%s) feature fusion", args.loss_profile, args.adamvs_feature_stage)
+    logger.info("  Loss profile: %s | DA3 pre-head + Ada-MVS(%s) cross-attention fusion", args.loss_profile, args.adamvs_feature_stage)
     logger.info("  LoRA: rank=%d, alpha=%d", args.lora_rank, args.lora_alpha)
     logger.info("  Ada-MVS ckpt: %s | fusion_dim=%d", adamvs_ckpt, args.fusion_dim)
     logger.info("  Loss: si=%.1f logl1=%.1f l1=%.1f grad=%.2f range=%.2f",
@@ -1103,6 +1123,7 @@ def main():
             )
             loss = loss_dict["loss"] / args.grad_accum_steps
             loss.backward()
+            depth_stats = collect_depth_distribution(pred_metric, depth_gt, valid_mask)
 
             if (step + 1) % args.grad_accum_steps == 0:
                 if args.max_grad_norm > 0:
@@ -1121,19 +1142,22 @@ def main():
                 current_lr = optimizer.param_groups[0]["lr"]
                 train_log = {
                     "loss_total": loss_dict["loss"].item(),
-                    "si_loss": loss_dict["si_loss"].item(),
+                    "relative_si_loss": loss_dict["relative_si_loss"].item(),
+                    "metric_si_loss": loss_dict["metric_si_loss"].item(),
                     "logl1_loss": loss_dict["logl1_loss"].item(),
                     "l1_loss": loss_dict["l1_loss"].item(),
+                    "absrel_loss": loss_dict["absrel_loss"].item(),
                     "gradient_loss": loss_dict["gradient_loss"].item(),
                     "range_loss": loss_dict["range_loss"].item(),
-                    "median_scale": loss_dict["median_scale"].item(),
+                    "confidence_loss": loss_dict["confidence_loss"].item(),
+                    "sky_loss": loss_dict["sky_loss"].item(),
                     "grad_norm": float(grad_norm.item()),
                 }
                 if aux_out.get("fusion_gate", None) is not None:
                     train_log["fusion_gate_mean"] = float(aux_out["fusion_gate"].mean().item())
                 if aux_out.get("fusion_delta", None) is not None:
                     train_log["fusion_delta_mean"] = float(aux_out["fusion_delta"].mean().item())
-                train_log.update(collect_depth_distribution(pred_metric, depth_gt, valid_mask))
+                train_log.update(depth_stats)
                 log_section_scalars(writer, "train", train_log, global_step)
                 log_section_scalars(writer, "lr", {
                     "main": current_lr,
@@ -1148,11 +1172,12 @@ def main():
             if step % 500 == 0:
                 current_lr = scheduler.get_last_lr()[0]
                 logger.info(
-                    "  E%d/%d Step %d/%d | lr=%.2e loss=%.2f si=%.4f logl1=%.4f l1=%.2f grad=%.4f median_scale=%.4f gate=%.3f",
+                    "  E%d/%d Step %d/%d | lr=%.2e loss=%.2f rel_si=%.4f metric_si=%.4f logl1=%.4f l1=%.2f grad=%.4f median_scale=%.4f gate=%.3f",
                     epoch + 1, args.epochs, step, len(train_loader),
-                    current_lr, loss_dict["loss"].item(), loss_dict["si_loss"].item(),
+                    current_lr, loss_dict["loss"].item(), loss_dict["relative_si_loss"].item(),
+                    loss_dict["metric_si_loss"].item(),
                     loss_dict["logl1_loss"].item(), loss_dict["l1_loss"].item(),
-                    loss_dict["gradient_loss"].item(), loss_dict["median_scale"].item(),
+                    loss_dict["gradient_loss"].item(), depth_stats.get("median_align_scale", 0.0),
                     float(aux_out["fusion_gate"].mean().item()) if aux_out.get("fusion_gate", None) is not None else 0.0,
                 )
 

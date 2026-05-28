@@ -10,7 +10,7 @@
 SPLIT="${SPLIT:-test}"
 DA3MVS_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/whu-omvs/train_da3mvs/da3_large_adamvs_fusion_0526/checkpoints/best.pt"
 AREAS="${AREAS:-area2 area3}"
-GPU_ID="${GPU_ID:-5}"
+GPU_ID="${GPU_ID:-6}"
 
 VIEW_NUM=5
 BATCH_SIZE=8
