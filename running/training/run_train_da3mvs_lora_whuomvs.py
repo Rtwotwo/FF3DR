@@ -445,34 +445,11 @@ def log_section_scalars(writer, section: str, metrics: Dict[str, float], step: i
 def _squeeze_spatial_map(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     if tensor is None:
         return None
-    if tensor.ndim == 4 and tensor.shape[1] == 1:
+    if tensor.ndim == 4:
         return tensor[:, 0]
-    if tensor.ndim == 4 and tensor.shape[1] > 1:
-        return tensor[:, 0]
+    if tensor.ndim == 3 and tensor.shape[0] == 1:
+        return tensor[0]
     return tensor
-
-
-def _safe_tensor_stats(values: torch.Tensor, prefix: str) -> Dict[str, float]:
-    if values.numel() == 0:
-        return {
-            f"{prefix}_mean": 0.0,
-            f"{prefix}_std": 0.0,
-            f"{prefix}_min": 0.0,
-            f"{prefix}_max": 0.0,
-            f"{prefix}_median": 0.0,
-        }
-    stats = {
-        f"{prefix}_mean": float(values.mean().item()),
-        f"{prefix}_min": float(values.min().item()),
-        f"{prefix}_max": float(values.max().item()),
-        f"{prefix}_median": float(values.median().item()),
-    }
-    if values.numel() > 1:
-        stats[f"{prefix}_std"] = float(values.std(unbiased=False).item())
-    else:
-        stats[f"{prefix}_std"] = 0.0
-    return stats
-
 
 def collect_depth_distribution(
     pred_depth: torch.Tensor,
@@ -600,10 +577,9 @@ def init_scale_from_dataset(da3_model, dataset, device, max_samples=200):
                 autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
                 with torch.amp.autocast("cuda", dtype=autocast_dtype):
                     output = da3_model.model(images_input)
-                    pred = output.depth[:, 0]
-                    if pred.ndim == 3 and pred.shape[1] == 1:
-                        pred = pred.squeeze(1)
-                pred = pred.float().cpu().numpy()[0]
+                    pred = output.depth
+                pred = pred.float().cpu().numpy()
+            pred = np.squeeze(pred)
             if pred.shape != depth_gt.shape:
                 from PIL import Image as PILImage
                 h, w = depth_gt.shape
@@ -611,11 +587,10 @@ def init_scale_from_dataset(da3_model, dataset, device, max_samples=200):
             valid = valid_mask & np.isfinite(pred) & np.isfinite(depth_gt) & (depth_gt > 1.0) & (pred > 1e-6)
             if valid.sum() < 100:
                 continue
-            pred_med = np.median(pred[valid])
-            gt_med = np.median(depth_gt[valid])
-            if np.isfinite(pred_med) and np.isfinite(gt_med) and pred_med > 1e-6:
-                pred_medians.append(pred_med)
-                gt_medians.append(gt_med)
+            pred_med = float(np.median(pred[valid]))
+            gt_med = float(np.median(depth_gt[valid]))
+            pred_medians.append(pred_med)
+            gt_medians.append(gt_med)
         except Exception as e:
             logger.warning("Skipping sample %d: %s", idx, e)
             continue
@@ -629,8 +604,6 @@ def init_scale_from_dataset(da3_model, dataset, device, max_samples=200):
     init_scale = float(np.median(gt_medians / np.maximum(pred_medians, 1e-6)))
     logger.info("Init scale: %.4f (from %d samples)", init_scale, len(pred_medians))
     return init_scale
-
-
 @torch.no_grad()
 def validate(model, dataloader, criterion, device, global_step, writer, tag="val"):
     raw = get_raw_model(model)
@@ -689,15 +662,9 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
             logged_depth_images = True
             n_vis = min(images.shape[0], 2)
             for vi in range(n_vis):
-                gt_vis = depth_gt[vi].cpu().numpy()
-                pred_vis = pred_metric[vi].cpu().numpy()
-                mask_vis = valid_mask[vi].cpu().numpy().astype(bool)
-                if gt_vis.ndim == 3 and gt_vis.shape[0] == 1:
-                    gt_vis = gt_vis[0]
-                if pred_vis.ndim == 3 and pred_vis.shape[0] == 1:
-                    pred_vis = pred_vis[0]
-                if mask_vis.ndim == 3 and mask_vis.shape[0] == 1:
-                    mask_vis = mask_vis[0]
+                gt_vis = np.squeeze(depth_gt[vi].cpu().numpy())
+                pred_vis = np.squeeze(pred_metric[vi].cpu().numpy())
+                mask_vis = np.squeeze(valid_mask[vi].cpu().numpy().astype(bool))
                 gt_valid = gt_vis[mask_vis]
                 pred_valid = pred_vis[mask_vis]
                 scale = np.median(gt_valid) / max(np.median(pred_valid), 1e-6) if pred_valid.size > 0 else 1.0
@@ -809,10 +776,10 @@ def main():
     parser.add_argument("--process_res", type=int, default=504)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--epochs", type=int, default=25)
+    parser.add_argument("--lr", type=float, default=7e-6)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--warmup_steps", type=int, default=500)
+    parser.add_argument("--warmup_steps", type=int, default=300)
     parser.add_argument("--grad_accum_steps", type=int, default=4)
     parser.add_argument("--lora_rank", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
@@ -838,17 +805,17 @@ def main():
     parser.add_argument("--train_adamvs", action="store_true", help="Reserved; Ada-MVS encoder stays frozen in this single-view fusion recipe")
     parser.add_argument("--train_da3_core", action="store_true", help="If set, DA3 head/cam/LoRA parameters remain trainable even when warm-starting from a LoRA checkpoint")
     parser.add_argument("--loss_profile", type=str, default="metric_v4", choices=["metric_v4"])
-    parser.add_argument("--relative_si_weight", type=float, default=0.5)
+    parser.add_argument("--relative_si_weight", type=float, default=0.4)
     parser.add_argument("--metric_si_weight", type=float, default=1.0)
     parser.add_argument("--phase1_metric_si_weight", type=float, default=0.0)
     parser.add_argument("--phase3_metric_si_weight", type=float, default=0.0)
-    parser.add_argument("--logl1_weight", type=float, default=6.0)
-    parser.add_argument("--l1_weight", type=float, default=0.5)
-    parser.add_argument("--absrel_weight", type=float, default=0.25)
-    parser.add_argument("--gradient_weight", type=float, default=0.35)
-    parser.add_argument("--range_weight", type=float, default=0.05)
-    parser.add_argument("--confidence_weight", type=float, default=0.2)
-    parser.add_argument("--sky_weight", type=float, default=0.1)
+    parser.add_argument("--logl1_weight", type=float, default=5.0)
+    parser.add_argument("--l1_weight", type=float, default=0.8)
+    parser.add_argument("--absrel_weight", type=float, default=0.3)
+    parser.add_argument("--gradient_weight", type=float, default=0.25)
+    parser.add_argument("--range_weight", type=float, default=0.03)
+    parser.add_argument("--confidence_weight", type=float, default=0.15)
+    parser.add_argument("--sky_weight", type=float, default=0.08)
     parser.add_argument("--confidence_tau", type=float, default=120.0)
     parser.add_argument("--sky_threshold", type=float, default=0.3)
     parser.add_argument("--far_depth_start", type=float, default=350.0)
@@ -862,13 +829,13 @@ def main():
     parser.add_argument("--log_level", type=str, default="INFO")
     parser.add_argument("--save_every_n_epochs", type=int, default=5)
     parser.add_argument("--resume", type=str, default=None)
-    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--max_grad_norm", type=float, default=0.8)
     parser.add_argument("--phase1_lr_scale", type=float, default=0.8)
     parser.add_argument("--phase2_lr_scale", type=float, default=1.0)
     parser.add_argument("--phase3_lr_scale", type=float, default=0.9)
     parser.add_argument("--ema_alpha", type=float, default=0.2)
-    parser.add_argument("--early_stop_patience", type=int, default=8)
-    parser.add_argument("--early_stop_min_delta", type=float, default=0.01)
+    parser.add_argument("--early_stop_patience", type=int, default=6)
+    parser.add_argument("--early_stop_min_delta", type=float, default=0.008)
     parser.add_argument("--early_stop_absrel_min_delta", type=float, default=0.0005)
     args = parser.parse_args()
 
@@ -978,8 +945,8 @@ def main():
         range_weight=args.range_weight,
         confidence_weight=args.confidence_weight,
         sky_weight=args.sky_weight,
-        scale_reg_weight=0.01,
-        shift_reg_weight=0.01,
+        scale_reg_weight=0.005,
+        shift_reg_weight=0.005,
         depth_range=(1.0, args.adapter_depth_norm * 3.5),
         depth_norm=args.adapter_depth_norm,
         confidence_tau=args.confidence_tau,

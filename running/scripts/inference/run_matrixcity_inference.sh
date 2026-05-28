@@ -13,14 +13,15 @@
 
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/MatrixCity"
 MODEL_NAME="depthanything3"
-CITY_SIZE="big_city"
+CITY_SIZE="small_city"
 TRAIN_TEST_SPLIT="train"
 GPU_ID=6
-CHUNK_SIZE=60
-OVERLAP=24
+CHUNK_SIZE=40
+OVERLAP=16
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-INFERENCE_SCRIPT="${SCRIPT_DIR}/../inference/run_matrixcity_inference.py"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+INFERENCE_SCRIPT="${PROJECT_ROOT}/running/inference/run_matrixcity_inference.py"
 
 if [ "$CITY_SIZE" == "small_city" ]; then
     if [ "$TRAIN_TEST_SPLIT" == "train" ]; then
@@ -56,17 +57,18 @@ echo " GPU: ${GPU_ID}"
 echo "=============================================="
 
 for BLOCK in "${BLOCKS[@]}"; do
-    AREA_PATH="${DATASET_PATH}/${CITY_SIZE}/aerial/${TRAIN_TEST_SPLIT}/${BLOCK}/"
-    OUTPUT_PATH="./exp/matrixcity/run_matrixcity_${MODEL_NAME}_${CITY_SIZE}_${TRAIN_TEST_SPLIT}_${BLOCK}"
+    AREA_PATH="${DATASET_PATH}/${CITY_SIZE}/aerial/${TRAIN_TEST_SPLIT}"
+    OUTPUT_PATH="${PROJECT_ROOT}/exp/matrixcity/run_matrixcity_${MODEL_NAME}_${CITY_SIZE}_${TRAIN_TEST_SPLIT}_${BLOCK}"
 
-    if [ ! -d "$AREA_PATH" ]; then
-        echo "[WARN $(date +"%Y-%m-%d %H:%M:%S")] Area path not found, skipping: ${AREA_PATH}"
+    if [ ! -d "${AREA_PATH}/${BLOCK}" ]; then
+        echo "[WARN $(date +"%Y-%m-%d %H:%M:%S")] Area path not found, skipping: ${AREA_PATH}/${BLOCK}"
         continue
     fi
 
     echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${CITY_SIZE}/${TRAIN_TEST_SPLIT}/${BLOCK}..."
     CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$INFERENCE_SCRIPT" \
         --area_path "$AREA_PATH" \
+        --block_name "$BLOCK" \
         --output_path "$OUTPUT_PATH" \
         --model_name "$MODEL_NAME" \
         --chunk_size "$CHUNK_SIZE" \
