@@ -27,7 +27,7 @@ for p in (_REPO_ROOT, _REPO_ROOT / "models", _SCRIPT_DIR.parent):
         sys.path.insert(0, str(p))
 
 from running.data.whuomvs_depth_dataset import WHUOMVSDepthDataset
-from running.training.da3_metric_loss import DepthOnlyLoss
+from running.training.da3_metric_loss import MetricDepthLossV4
 from models.adamvs.adamvs import FeatureNet0
 
 logger = logging.getLogger(__name__)
@@ -171,6 +171,13 @@ def _extract_adamvs_feature_state(state_dict: Dict[str, torch.Tensor]) -> Dict[s
 
 
 class AdaMVSFeatureEncoder(nn.Module):
+    """Frozen Ada-MVS encoder used as a single-view feature prior.
+
+    This branch is inference-only in the current recipe: the Ada-MVS
+    checkpoint provides a feature map, while DA3 + fusion layers remain
+    trainable.
+    """
+
     def __init__(self, ckpt_path: Optional[str], stage_key: str = "stage3", trainable: bool = False):
         super().__init__()
         self.stage_key = stage_key
@@ -189,17 +196,15 @@ class AdaMVSFeatureEncoder(nn.Module):
         else:
             logger.warning("Ada-MVS checkpoint not found, using random feature encoder: %s", ckpt_path)
 
-        # Control whether Ada-MVS encoder parameters are trainable.
-        self.trainable = bool(trainable)
+        if trainable:
+            logger.warning("Ada-MVS encoder is frozen in this recipe; ignoring trainable=True")
+
+        self.feature.eval()
         for p in self.feature.parameters():
-            p.requires_grad = self.trainable
+            p.requires_grad = False
 
     def forward(self, image_b3hw: torch.Tensor) -> torch.Tensor:
-        if not self.trainable:
-            # keep inference-only fast path when encoder is frozen
-            with torch.no_grad():
-                feat_dict = self.feature(image_b3hw)
-        else:
+        with torch.no_grad():
             feat_dict = self.feature(image_b3hw)
         if self.stage_key not in feat_dict:
             raise KeyError(f"Ada-MVS feature stage '{self.stage_key}' not found. keys={list(feat_dict.keys())}")
@@ -219,6 +224,12 @@ class DA3MVSFusionHead(nn.Module):
         )
         self.delta_head = nn.Conv2d(fusion_dim, 1, kernel_size=1, stride=1, padding=0)
         self.gate_head = nn.Conv2d(fusion_dim, 1, kernel_size=1, stride=1, padding=0)
+
+        # Start from the DA3 metric prediction and learn small residual updates.
+        nn.init.zeros_(self.delta_head.weight)
+        nn.init.zeros_(self.delta_head.bias)
+        nn.init.zeros_(self.gate_head.weight)
+        nn.init.constant_(self.gate_head.bias, -2.0)
 
     def forward(
         self,
@@ -275,6 +286,11 @@ class LayerAttentionFusionHead(nn.Module):
         )
         self.delta_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
         self.gate_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
+
+        nn.init.zeros_(self.delta_head.weight)
+        nn.init.zeros_(self.delta_head.bias)
+        nn.init.zeros_(self.gate_head.weight)
+        nn.init.constant_(self.gate_head.bias, -2.0)
 
     def forward(self, da3_pre_head_feat: torch.Tensor, adamvs_feat: torch.Tensor, base_metric_depth: torch.Tensor):
         target_hw = da3_pre_head_feat.shape[-2:]
@@ -520,6 +536,22 @@ def apply_lora_to_model(model, lora_rank=16, lora_alpha=32, lora_dropout=0.05, t
     return model
 
 
+def load_da3_lora_checkpoint(model, lora_checkpoint: str):
+    if not lora_checkpoint:
+        return model
+
+    ckpt = torch.load(lora_checkpoint, map_location="cpu", weights_only=False)
+    model_sd = ckpt.get("model_state_dict", ckpt)
+
+    logger.info("Loading DA3 LoRA warm start from %s", lora_checkpoint)
+    missing, unexpected = model.load_state_dict(model_sd, strict=False)
+    if missing:
+        logger.warning("Missing keys when loading DA3 LoRA warm start (%d): %s", len(missing), missing[:5])
+    if unexpected:
+        logger.warning("Unexpected keys when loading DA3 LoRA warm start (%d): %s", len(unexpected), unexpected[:5])
+    return model
+
+
 def build_da3_model(model_name="da3-large", pretrained_path=None):
     from da3.api import DepthAnything3
 
@@ -598,11 +630,16 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
         valid_mask = batch["valid_mask"].to(device)
         images_input = images.unsqueeze(1)
 
-        pred_depth, _, pred_conf, pred_sky, _ = raw(images_input)
+        pred_depth, pred_metric, pred_conf, pred_sky, aux_out = raw(images_input)
 
         if pred_depth.shape[-2:] != depth_gt.shape[-2:]:
             pred_depth = F.interpolate(
                 pred_depth.unsqueeze(1), size=depth_gt.shape[-2:],
+                mode="bilinear", align_corners=True,
+            ).squeeze(1)
+        if pred_metric.shape[-2:] != depth_gt.shape[-2:]:
+            pred_metric = F.interpolate(
+                pred_metric.unsqueeze(1), size=depth_gt.shape[-2:],
                 mode="bilinear", align_corners=True,
             ).squeeze(1)
         if pred_conf is not None and pred_conf.shape[-2:] != depth_gt.shape[-2:]:
@@ -618,8 +655,13 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
 
         loss_dict = criterion(
             pred_depth,
+            pred_metric,
             depth_gt,
             valid_mask,
+            pred_conf,
+            pred_sky,
+            log_scale=aux_out.get("metric_log_scale") if isinstance(aux_out, dict) else None,
+            shift=aux_out.get("metric_shift") if isinstance(aux_out, dict) else None,
         )
         total_loss += loss_dict["loss"].item()
 
@@ -628,7 +670,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
             n_vis = min(images.shape[0], 2)
             for vi in range(n_vis):
                 gt_vis = depth_gt[vi].cpu().numpy()
-                pred_vis = pred_depth[vi].cpu().numpy()
+                pred_vis = pred_metric[vi].cpu().numpy()
                 mask_vis = valid_mask[vi].cpu().numpy().astype(bool)
                 if gt_vis.ndim == 3 and gt_vis.shape[0] == 1:
                     gt_vis = gt_vis[0]
@@ -668,7 +710,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
                     global_step,
                 )
 
-        pred_np = pred_depth.cpu().numpy()
+        pred_np = pred_metric.cpu().numpy()
         gt_np = depth_gt.cpu().numpy()
         mask_np = valid_mask.cpu().numpy().astype(bool)
         if pred_np.ndim == 4 and pred_np.shape[1] == 1:
@@ -706,7 +748,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
     return metrics
 
 
-def set_phase_grads(model, phase, train_adamvs: bool = False):
+def set_phase_grads(model, phase, train_adamvs: bool = False, train_da3_core: bool = True):
     raw = get_raw_model(model)
     da3_model = raw.da3.model
 
@@ -716,32 +758,34 @@ def set_phase_grads(model, phase, train_adamvs: bool = False):
         for param in raw.scale_shift.parameters():
             param.requires_grad = True
 
-    head_modules = [getattr(da3_model, "head", None), getattr(da3_model, "cam_enc", None), getattr(da3_model, "cam_dec", None)]
-    for module in head_modules:
-        if module is not None:
-            for param in module.parameters():
-                param.requires_grad = True
+    if train_da3_core:
+        head_modules = [getattr(da3_model, "head", None), getattr(da3_model, "cam_enc", None), getattr(da3_model, "cam_dec", None)]
+        for module in head_modules:
+            if module is not None:
+                for param in module.parameters():
+                    param.requires_grad = True
 
-    for name, param in da3_model.named_parameters():
-        if "lora" in name.lower():
-            param.requires_grad = True
+        for name, param in da3_model.named_parameters():
+            if "lora" in name.lower():
+                param.requires_grad = True
 
     for p in raw.fusion_head.parameters():
         p.requires_grad = True
 
     for p in raw.adamvs_encoder.parameters():
-        p.requires_grad = bool(train_adamvs)
+        p.requires_grad = False
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train DA3MVS with Ada-MVS feature fusion for depth-only supervision on WHU-OMVS"
+        description="Train DA3MVS with Ada-MVS feature fusion and metric supervision on WHU-OMVS"
     )
     parser.add_argument("--dataset_root", type=str, default="dataset/WHU-OMVS")
     parser.add_argument("--output_dir", type=str, default="exp/whu-omvs/train_da3mvs/da3_large_adamvs_fusion")
     parser.add_argument("--model_name", type=str, default="da3-large",
                         choices=["da3-base", "da3-large", "da3-giant", "da3-small"])
     parser.add_argument("--pretrained_path", type=str, default=None)
+    parser.add_argument("--da3_lora_checkpoint", type=str, default=None)
     parser.add_argument("--process_res", type=int, default=504)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -771,19 +815,20 @@ def main():
     )
     parser.add_argument("--fusion_dim", type=int, default=128)
     parser.add_argument("--fusion_type", type=str, default="layer_attention", choices=["conv", "layer_attention"])
-    parser.add_argument("--train_adamvs", action="store_true", help="If set, Ada-MVS encoder parameters will be trained jointly (do not freeze)")
-    parser.add_argument("--loss_profile", type=str, default="depth_only", choices=["depth_only"])
-    parser.add_argument("--relative_si_weight", type=float, default=0.0)
-    parser.add_argument("--metric_si_weight", type=float, default=0.0)
+    parser.add_argument("--train_adamvs", action="store_true", help="Reserved; Ada-MVS encoder stays frozen in this single-view fusion recipe")
+    parser.add_argument("--train_da3_core", action="store_true", help="If set, DA3 head/cam/LoRA parameters remain trainable even when warm-starting from a LoRA checkpoint")
+    parser.add_argument("--loss_profile", type=str, default="metric_v4", choices=["metric_v4"])
+    parser.add_argument("--relative_si_weight", type=float, default=0.5)
+    parser.add_argument("--metric_si_weight", type=float, default=1.0)
     parser.add_argument("--phase1_metric_si_weight", type=float, default=0.0)
     parser.add_argument("--phase3_metric_si_weight", type=float, default=0.0)
-    parser.add_argument("--logl1_weight", type=float, default=0.1)
-    parser.add_argument("--l1_weight", type=float, default=1.0)
-    parser.add_argument("--absrel_weight", type=float, default=0.0)
-    parser.add_argument("--gradient_weight", type=float, default=0.1)
-    parser.add_argument("--range_weight", type=float, default=0.0)
-    parser.add_argument("--confidence_weight", type=float, default=0.0)
-    parser.add_argument("--sky_weight", type=float, default=0.0)
+    parser.add_argument("--logl1_weight", type=float, default=6.0)
+    parser.add_argument("--l1_weight", type=float, default=0.5)
+    parser.add_argument("--absrel_weight", type=float, default=0.25)
+    parser.add_argument("--gradient_weight", type=float, default=0.35)
+    parser.add_argument("--range_weight", type=float, default=0.05)
+    parser.add_argument("--confidence_weight", type=float, default=0.2)
+    parser.add_argument("--sky_weight", type=float, default=0.1)
     parser.add_argument("--confidence_tau", type=float, default=120.0)
     parser.add_argument("--sky_threshold", type=float, default=0.3)
     parser.add_argument("--far_depth_start", type=float, default=350.0)
@@ -888,7 +933,11 @@ def main():
     )
     da3_model.model = da3_inner
 
-    set_phase_grads(model, 1, train_adamvs=args.train_adamvs)
+    if args.da3_lora_checkpoint:
+        model = load_da3_lora_checkpoint(model, args.da3_lora_checkpoint)
+
+    train_da3_core = bool(args.train_da3_core) or not bool(args.da3_lora_checkpoint)
+    set_phase_grads(model, 1, train_adamvs=args.train_adamvs, train_da3_core=train_da3_core)
 
     raw_model = get_raw_model(model)
     head_params = count_params_safe(raw_model.da3.model.head)
@@ -897,16 +946,27 @@ def main():
     logger.info("Trainable: %d / %d (%.2f%%) | Head: %d | Frozen helper: %d",
                 trainable_params, total_params, 100.0 * trainable_params / total_params,
                 head_params, sum(p.numel() for p in raw_model.scale_shift.parameters()))
-    logger.info("Depth-only mode with Ada-MVS feature fusion enabled.")
+    logger.info("Metric fusion mode with Ada-MVS feature fusion enabled.")
 
-    criterion = DepthOnlyLoss(
-        si_weight=args.relative_si_weight,
+    criterion = MetricDepthLossV4(
+        relative_si_weight=args.relative_si_weight,
+        metric_si_weight=args.metric_si_weight,
         logl1_weight=args.logl1_weight,
         l1_weight=args.l1_weight,
+        absrel_weight=args.absrel_weight,
         gradient_weight=args.gradient_weight,
         range_weight=args.range_weight,
+        confidence_weight=args.confidence_weight,
+        sky_weight=args.sky_weight,
+        scale_reg_weight=0.01,
+        shift_reg_weight=0.01,
         depth_range=(1.0, args.adapter_depth_norm * 3.5),
-        median_align=False,
+        depth_norm=args.adapter_depth_norm,
+        confidence_tau=args.confidence_tau,
+        sky_threshold=args.sky_threshold,
+        far_depth_start=args.far_depth_start,
+        far_depth_boost=args.far_depth_boost,
+        far_depth_transition=args.far_depth_transition,
     )
 
     train_loader = DataLoader(
@@ -980,7 +1040,7 @@ def main():
     logger.info("  Model: %s (%.1fM params)", args.model_name, total_params / 1e6)
     logger.info("  Train: %d samples, Val: %d samples, Test: %d samples",
                 len(train_dataset), len(val_dataset), len(test_dataset))
-    logger.info("  Epochs: %d (single-stage depth-only)", args.epochs)
+    logger.info("  Epochs: %d (single-stage metric fusion)", args.epochs)
     logger.info("  LR: %.2e, Warmup: %d steps, Grad accum: %d",
                 args.lr, warmup_steps, args.grad_accum_steps)
     logger.info("  Loss profile: %s | DA3 pre-head + Ada-MVS(%s) feature fusion", args.loss_profile, args.adamvs_feature_stage)
@@ -1031,7 +1091,16 @@ def main():
                     mode="bilinear", align_corners=True,
                 ).squeeze(1)
 
-            loss_dict = criterion(pred_metric, depth_gt, valid_mask)
+            loss_dict = criterion(
+                pred_depth,
+                pred_metric,
+                depth_gt,
+                valid_mask,
+                None,
+                None,
+                log_scale=aux_out.get("metric_log_scale") if isinstance(aux_out, dict) else None,
+                shift=aux_out.get("metric_shift") if isinstance(aux_out, dict) else None,
+            )
             loss = loss_dict["loss"] / args.grad_accum_steps
             loss.backward()
 

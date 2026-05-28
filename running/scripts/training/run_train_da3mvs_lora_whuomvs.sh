@@ -18,9 +18,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 DATASET_ROOT="${PROJECT_ROOT}/dataset/WHU-OMVS"
-OUTPUT_DIR="${PROJECT_ROOT}/exp/whu-omvs/train_da3mvs/da3_large_adamvs_fusion_0524"
+OUTPUT_DIR="${PROJECT_ROOT}/exp/whu-omvs/train_da3mvs_lora/da3_large_adamvs_lora_fusion_0528"
 MODEL_NAME="da3-large"
 PRETRAINED_PATH=""
+DA3_LORA_CHECKPOINT="${PROJECT_ROOT}/exp/whu-omvs/train_lora_da3/da3_large_lora_whuomvs_0523/checkpoints/best.pt"
 ADAMVS_CKPT="${PROJECT_ROOT}/weights/adamvs/adamvs_whuomvs/model_000019_0.1339.ckpt"
 ADAMVS_FEATURE_STAGE="stage3"
 FUSION_DIM=128
@@ -38,18 +39,18 @@ LORA_DROPOUT=0.05
 LORA_TARGET_MODULES="qkv proj"
 ADAPTER_HIDDEN_DIM=64
 ADAPTER_DEPTH_NORM=600.0
-LOSS_PROFILE="depth_only"
-RELATIVE_SI_WEIGHT=0.0
-METRIC_SI_WEIGHT=0.0
+LOSS_PROFILE="metric_v4"
+RELATIVE_SI_WEIGHT=0.5
+METRIC_SI_WEIGHT=1.0
 PHASE1_METRIC_SI_WEIGHT=0.0
 PHASE3_METRIC_SI_WEIGHT=0.0
-LOGL1_WEIGHT=0.1
-L1_WEIGHT=1.0
-ABSREL_WEIGHT=0.0
-GRADIENT_WEIGHT=0.1
-RANGE_WEIGHT=0.0
-CONFIDENCE_WEIGHT=0.0
-SKY_WEIGHT=0.0
+LOGL1_WEIGHT=6.0
+L1_WEIGHT=0.5
+ABSREL_WEIGHT=0.25
+GRADIENT_WEIGHT=0.35
+RANGE_WEIGHT=0.05
+CONFIDENCE_WEIGHT=0.2
+SKY_WEIGHT=0.1
 MAX_GRAD_NORM=1.0
 EMA_ALPHA=0.2
 EARLY_STOP_PATIENCE=8
@@ -64,6 +65,7 @@ SAVE_EVERY_N_EPOCHS=1
 SEED=42
 LOG_LEVEL=INFO
 RESUME=""
+TRAIN_DA3_CORE=false
 EXTRA_ARGS=""
 
 while [[ $# -gt 0 ]]; do
@@ -72,6 +74,7 @@ while [[ $# -gt 0 ]]; do
 		--output_dir)          shift; OUTPUT_DIR="$1" ;;
 		--model_name)          shift; MODEL_NAME="$1" ;;
 		--pretrained_path)     shift; PRETRAINED_PATH="$1" ;;
+		--da3_lora_checkpoint) shift; DA3_LORA_CHECKPOINT="$1" ;;
 		--adamvs_ckpt)         shift; ADAMVS_CKPT="$1" ;;
 		--adamvs_feature_stage) shift; ADAMVS_FEATURE_STAGE="$1" ;;
 		--fusion_dim)          shift; FUSION_DIM="$1" ;;
@@ -113,6 +116,7 @@ while [[ $# -gt 0 ]]; do
 		--seed)                shift; SEED="$1" ;;
 		--log_level)           shift; LOG_LEVEL="$1" ;;
 		--resume)              shift; RESUME="$1" ;;
+		--train_da3_core)      TRAIN_DA3_CORE=true ;;
 		*)                     EXTRA_ARGS="${EXTRA_ARGS} $1" ;;
 	esac
 	shift
@@ -124,6 +128,7 @@ echo "============================================"
 echo "Model:          ${MODEL_NAME}"
 echo "Dataset:        ${DATASET_ROOT}"
 echo "Output:         ${OUTPUT_DIR}"
+echo "DA3 LoRA ckpt:  ${DA3_LORA_CHECKPOINT}"
 echo "Ada-MVS ckpt:   ${ADAMVS_CKPT}"
 echo "Ada feat stage: ${ADAMVS_FEATURE_STAGE}"
 echo "Fusion dim:     ${FUSION_DIM}"
@@ -135,7 +140,7 @@ echo "LR:             ${LR}, warmup=${WARMUP_STEPS}"
 echo "LoRA:           rank=${LORA_RANK}, alpha=${LORA_ALPHA}, targets=${LORA_TARGET_MODULES}"
 echo "Adapter:        hidden=${ADAPTER_HIDDEN_DIM}, depth_norm=${ADAPTER_DEPTH_NORM}"
 echo "Profile:        ${LOSS_PROFILE}"
-echo "Loss:           si=${RELATIVE_SI_WEIGHT} logl1=${LOGL1_WEIGHT} l1=${L1_WEIGHT} grad=${GRADIENT_WEIGHT} range=${RANGE_WEIGHT}"
+echo "Loss:           rel_si=${RELATIVE_SI_WEIGHT} metric_si=${METRIC_SI_WEIGHT} logl1=${LOGL1_WEIGHT} l1=${L1_WEIGHT} absrel=${ABSREL_WEIGHT} grad=${GRADIENT_WEIGHT} range=${RANGE_WEIGHT} conf=${CONFIDENCE_WEIGHT} sky=${SKY_WEIGHT}"
 echo "Stability:      grad_clip=${MAX_GRAD_NORM} ema_alpha=${EMA_ALPHA} early_stop=${EARLY_STOP_PATIENCE} mae_delta=${EARLY_STOP_MIN_DELTA}"
 echo "Resume:         ${RESUME:-none}"
 echo "============================================"
@@ -152,11 +157,12 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 
-python3 -m running.training.run_train_da3mvs_whuomvs \
+python3 -m running.training.run_train_da3mvs_lora_whuomvs \
 	--dataset_root "${DATASET_ROOT}" \
 	--output_dir "${OUTPUT_DIR}" \
 	--model_name "${MODEL_NAME}" \
 	${PRETRAINED_FLAG} \
+	--da3_lora_checkpoint "${DA3_LORA_CHECKPOINT}" \
 	--adamvs_ckpt "${ADAMVS_CKPT}" \
 	--adamvs_feature_stage ${ADAMVS_FEATURE_STAGE} \
 	--fusion_dim ${FUSION_DIM} \
@@ -190,6 +196,7 @@ python3 -m running.training.run_train_da3mvs_whuomvs \
 	--early_stop_min_delta ${EARLY_STOP_MIN_DELTA} \
 	--confidence_tau ${CONFIDENCE_TAU} \
 	--sky_threshold ${SKY_THRESHOLD} \
+	$(if [[ "${TRAIN_DA3_CORE}" == "true" ]]; then echo "--train_da3_core"; fi) \
 	--max_train_samples ${MAX_TRAIN_SAMPLES} \
 	--max_val_samples ${MAX_VAL_SAMPLES} \
 	--max_test_samples ${MAX_TEST_SAMPLES} \
