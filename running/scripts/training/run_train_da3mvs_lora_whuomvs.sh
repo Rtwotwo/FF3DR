@@ -2,7 +2,7 @@
 # Train DA3MVS (DA3 + Ada-MVS feature fusion) on WHU-OMVS depth GT
 #
 # Key points:
-#   - Ada-MVS feature encoder is frozen (no Ada-MVS training)
+#   - Ada-MVS is frozen and only its multi-view pre-depth feature is used
 #   - Fusion uses Ada-MVS pre-depth features + DA3 DualDPT pre-head features
 #   - Supervision uses WHU-OMVS train depth GT
 #
@@ -23,15 +23,14 @@ MODEL_NAME="da3-large"
 PRETRAINED_PATH=""
 DA3_LORA_CHECKPOINT="${PROJECT_ROOT}/exp/whu-omvs/train_lora_da3/da3_large_lora_whuomvs_0523/checkpoints/best.pt"
 ADAMVS_CKPT="${PROJECT_ROOT}/weights/adamvs/adamvs_whuomvs/model_000019_0.1339.ckpt"
-ADAMVS_FEATURE_STAGE="stage3"
 FUSION_DIM=128
 GPUS="5"
 BATCH_SIZE=4
 PROCESS_RES=504
-EPOCHS=25
-LR=7e-6
+EPOCHS=40
+LR=4e-6
 WEIGHT_DECAY=1e-4
-WARMUP_STEPS=300
+WARMUP_STEPS=800
 GRAD_ACCUM_STEPS=2
 LORA_RANK=16
 LORA_ALPHA=32
@@ -40,21 +39,19 @@ LORA_TARGET_MODULES="qkv proj"
 ADAPTER_HIDDEN_DIM=64
 ADAPTER_DEPTH_NORM=600.0
 LOSS_PROFILE="metric_v4"
-RELATIVE_SI_WEIGHT=0.4
-METRIC_SI_WEIGHT=1.0
-PHASE1_METRIC_SI_WEIGHT=0.0
-PHASE3_METRIC_SI_WEIGHT=0.0
-LOGL1_WEIGHT=5.0
-L1_WEIGHT=0.8
-ABSREL_WEIGHT=0.3
-GRADIENT_WEIGHT=0.25
-RANGE_WEIGHT=0.03
-CONFIDENCE_WEIGHT=0.15
-SKY_WEIGHT=0.08
+RELATIVE_SI_WEIGHT=0.3
+METRIC_SI_WEIGHT=1.2
+LOGL1_WEIGHT=4.0
+L1_WEIGHT=0.7
+ABSREL_WEIGHT=0.2
+GRADIENT_WEIGHT=0.15
+RANGE_WEIGHT=0.02
+CONFIDENCE_WEIGHT=0.1
+SKY_WEIGHT=0.05
 MAX_GRAD_NORM=0.8
 EMA_ALPHA=0.2
-EARLY_STOP_PATIENCE=6
-EARLY_STOP_MIN_DELTA=0.008
+EARLY_STOP_PATIENCE=10
+EARLY_STOP_MIN_DELTA=0.003
 CONFIDENCE_TAU=120.0
 SKY_THRESHOLD=0.3
 NUM_WORKERS=4
@@ -65,7 +62,6 @@ SAVE_EVERY_N_EPOCHS=1
 SEED=42
 LOG_LEVEL=INFO
 RESUME=""
-TRAIN_DA3_CORE=false
 EXTRA_ARGS=""
 
 while [[ $# -gt 0 ]]; do
@@ -76,7 +72,6 @@ while [[ $# -gt 0 ]]; do
 		--pretrained_path)     shift; PRETRAINED_PATH="$1" ;;
 		--da3_lora_checkpoint) shift; DA3_LORA_CHECKPOINT="$1" ;;
 		--adamvs_ckpt)         shift; ADAMVS_CKPT="$1" ;;
-		--adamvs_feature_stage) shift; ADAMVS_FEATURE_STAGE="$1" ;;
 		--fusion_dim)          shift; FUSION_DIM="$1" ;;
 		--gpus)                shift; GPUS="$1" ;;
 		--batch_size)          shift; BATCH_SIZE="$1" ;;
@@ -116,7 +111,6 @@ while [[ $# -gt 0 ]]; do
 		--seed)                shift; SEED="$1" ;;
 		--log_level)           shift; LOG_LEVEL="$1" ;;
 		--resume)              shift; RESUME="$1" ;;
-		--train_da3_core)      TRAIN_DA3_CORE=true ;;
 		*)                     EXTRA_ARGS="${EXTRA_ARGS} $1" ;;
 	esac
 	shift
@@ -130,7 +124,6 @@ echo "Dataset:        ${DATASET_ROOT}"
 echo "Output:         ${OUTPUT_DIR}"
 echo "DA3 LoRA ckpt:  ${DA3_LORA_CHECKPOINT}"
 echo "Ada-MVS ckpt:   ${ADAMVS_CKPT}"
-echo "Ada feat stage: ${ADAMVS_FEATURE_STAGE}"
 echo "Fusion dim:     ${FUSION_DIM}"
 echo "GPU:            ${GPUS}"
 echo "Batch size:     ${BATCH_SIZE} x grad_accum=${GRAD_ACCUM_STEPS} = effective $((BATCH_SIZE * GRAD_ACCUM_STEPS))"
@@ -164,7 +157,6 @@ python3 -m running.training.run_train_da3mvs_lora_whuomvs \
 	${PRETRAINED_FLAG} \
 	--da3_lora_checkpoint "${DA3_LORA_CHECKPOINT}" \
 	--adamvs_ckpt "${ADAMVS_CKPT}" \
-	--adamvs_feature_stage ${ADAMVS_FEATURE_STAGE} \
 	--fusion_dim ${FUSION_DIM} \
 	--process_res ${PROCESS_RES} \
 	--batch_size ${BATCH_SIZE} \
@@ -196,7 +188,6 @@ python3 -m running.training.run_train_da3mvs_lora_whuomvs \
 	--early_stop_min_delta ${EARLY_STOP_MIN_DELTA} \
 	--confidence_tau ${CONFIDENCE_TAU} \
 	--sky_threshold ${SKY_THRESHOLD} \
-	$(if [[ "${TRAIN_DA3_CORE}" == "true" ]]; then echo "--train_da3_core"; fi) \
 	--max_train_samples ${MAX_TRAIN_SAMPLES} \
 	--max_val_samples ${MAX_VAL_SAMPLES} \
 	--max_test_samples ${MAX_TEST_SAMPLES} \

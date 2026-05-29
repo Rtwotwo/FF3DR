@@ -244,7 +244,7 @@ class DepthNet0(nn.Module):
         self.reg = CostRegNet2D(in_depths, base_channels)
         self.reg_fuse = CostRegNetRED(in_channels, in_up, base_channels)
 
-    def forward(self, features, proj_matrices, depth_values, num_depth, confidence_map=None):
+    def forward(self, features, proj_matrices, depth_values, num_depth, confidence_map=None, return_pre_depth_feature=False):
         proj_matrices = torch.unbind(proj_matrices, 1)
         assert len(features) == len(proj_matrices), "Different number of images and projection matrices"
         assert depth_values.shape[1] == num_depth, "depth_values.shape[1]:{}  num_depth:{}".format(depth_values.shapep[1], num_depth)
@@ -288,6 +288,7 @@ class DepthNet0(nn.Module):
 
             del warped_volume, warped_volume2
             fused_interm /= weight_sum
+            pre_depth_feature = fused_interm.mean(dim=2).contiguous()
         else:
             for src_fea, src_proj, confidence in zip(src_features, src_projs, confidence_map):
                 warped_volume = homo_warping_float(src_fea, src_proj, ref_proj, depth_values)
@@ -309,7 +310,10 @@ class DepthNet0(nn.Module):
         depth = depth_regression(prob_volume, depth_values=depth_values)
         photometric_confidence, indices = prob_volume.max(1)
 
-        return {"depth": depth, "photometric_confidence": photometric_confidence, "pair_confidence": pair_confidence, "pair_result": pair_results}
+        outputs = {"depth": depth, "photometric_confidence": photometric_confidence, "pair_confidence": pair_confidence, "pair_result": pair_results}
+        if return_pre_depth_feature:
+            outputs["pre_depth_feature"] = pre_depth_feature
+        return outputs
 
 
 # train & test
@@ -339,7 +343,7 @@ class AdaMVSNet(nn.Module):
         self.feature = FeatureNet0(base_channels=8, stride=4, num_stage=self.num_stage) # unet
         self.DepthNet = nn.ModuleList([DepthNet0(in_depths=self.ndepths[0], in_channels=self.feature.out_channels[0]), DepthNet0(in_depths=self.ndepths[0],in_channels=self.feature.out_channels[1]), DepthNet0(in_depths=self.ndepths[0], in_up=False, in_channels=self.feature.out_channels[2])])
 
-    def forward(self, imgs, proj_matrices, depth_values):
+    def forward(self, imgs, proj_matrices, depth_values, return_pre_depth_feature=False):
 
         depth_min = float(depth_values[0, 0].cpu().numpy())
         depth_max = float(depth_values[0, -2].cpu().numpy())
@@ -385,13 +389,16 @@ class AdaMVSNet(nn.Module):
                                                           min_depth=depth_min)
 
             outputs_stage = self.DepthNet[stage_idx](features_stage, proj_matrices_stage,
-                                          depth_values=depth_range_samples, num_depth=self.ndepths[stage_idx], confidence_map=pair_confidence)
+                                          depth_values=depth_range_samples, num_depth=self.ndepths[stage_idx], confidence_map=pair_confidence,
+                                          return_pre_depth_feature=return_pre_depth_feature)
 
             depth = outputs_stage['depth']
             pair_confidence = outputs_stage['pair_confidence']
 
             outputs["stage{}".format(stage_idx + 1)] = outputs_stage
             outputs.update(outputs_stage)
+            if return_pre_depth_feature and "pre_depth_feature" in outputs_stage:
+                outputs[f"pre_depth_feature_stage{stage_idx + 1}"] = outputs_stage["pre_depth_feature"]
 
         return outputs
 

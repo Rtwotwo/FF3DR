@@ -28,7 +28,7 @@ for p in (_REPO_ROOT, _REPO_ROOT / "models", _SCRIPT_DIR.parent):
 
 from running.data.whuomvs_depth_dataset import WHUOMVSDepthDataset
 from running.training.da3_metric_loss import MetricDepthLossV4
-from models.adamvs.adamvs import FeatureNet0
+from models.adamvs.adamvs import AdaMVSNet
 
 logger = logging.getLogger(__name__)
 
@@ -162,53 +162,114 @@ class MetricDepthLossV2(nn.Module):
         return (below.mean() + above.mean())
 
 
-def _extract_adamvs_feature_state(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    feature_state: Dict[str, torch.Tensor] = {}
-    for k, v in state_dict.items():
-        if k.startswith("feature."):
-            feature_state[k[len("feature."):]] = v
-    return feature_state
+def _build_adamvs_proj_matrices(extrinsics: torch.Tensor, intrinsics: torch.Tensor) -> Dict[str, torch.Tensor]:
+    if extrinsics.ndim == 3:
+        extrinsics = extrinsics.unsqueeze(1)
+    if intrinsics.ndim == 3:
+        intrinsics = intrinsics.unsqueeze(1)
+    if extrinsics.ndim != 4 or intrinsics.ndim != 4:
+        raise ValueError(f"Expected batched extrinsics/intrinsics, got {extrinsics.shape} / {intrinsics.shape}")
+    if extrinsics.shape[:2] != intrinsics.shape[:2]:
+        raise ValueError(f"Extrinsics/intrinsics batch mismatch: {extrinsics.shape} vs {intrinsics.shape}")
+
+    proj_matrices = torch.matmul(intrinsics, extrinsics[:, :, :3, :])
+    proj_matrices = F.pad(proj_matrices, (0, 0, 0, 1), value=0.0)
+    proj_matrices[:, :, 3, 3] = 1.0
+
+    stage1 = proj_matrices.clone()
+    stage1[:, :, :2, :] = proj_matrices[:, :, :2, :] / 4.0
+    stage2 = proj_matrices.clone()
+    stage2[:, :, :2, :] = proj_matrices[:, :, :2, :] / 2.0
+
+    return {"stage1": stage1, "stage2": stage2, "stage3": proj_matrices}
 
 
-class AdaMVSFeatureEncoder(nn.Module):
-    """Frozen Ada-MVS encoder used as a single-view feature prior.
+def _build_adamvs_depth_values(
+    depth_gt: torch.Tensor,
+    valid_mask: Optional[torch.Tensor],
+    num_depth: int,
+    fallback_min: float = 1.0,
+    fallback_max: float = 2000.0,
+) -> torch.Tensor:
+    if depth_gt.ndim != 3:
+        raise ValueError(f"Expected depth_gt shape [B,H,W], got {depth_gt.shape}")
+    if valid_mask is None:
+        valid_mask = torch.isfinite(depth_gt) & (depth_gt > 0)
+    else:
+        valid_mask = valid_mask.bool() & torch.isfinite(depth_gt) & (depth_gt > 0)
 
-    This branch is inference-only in the current recipe: the Ada-MVS
-    checkpoint provides a feature map, while DA3 + fusion layers remain
-    trainable.
+    values = []
+    for b in range(depth_gt.shape[0]):
+        valid = depth_gt[b][valid_mask[b]]
+        if valid.numel() < 10:
+            depth_min = fallback_min
+            depth_max = fallback_max
+        else:
+            depth_min = float(valid.min().item())
+            depth_max = float(valid.max().item())
+            if not math.isfinite(depth_min):
+                depth_min = fallback_min
+            if not math.isfinite(depth_max):
+                depth_max = fallback_max
+            if depth_max <= depth_min + 1e-3:
+                depth_max = depth_min + 1.0
+        depth_interval = max((depth_max - depth_min) / max(num_depth - 1, 1), 1e-3)
+        values.append([depth_min, depth_max, depth_interval])
+    return torch.tensor(values, device=depth_gt.device, dtype=depth_gt.dtype)
+
+
+class AdaMVSPreDepthFeatureExtractor(nn.Module):
+    """Frozen Ada-MVS depth-branch feature extractor.
+
+    This wrapper runs the full Ada-MVS forward pass and exposes the final
+    stage pre-depth fused feature map from the MVS branch, not the plain
+    image encoder output.
     """
 
-    def __init__(self, ckpt_path: Optional[str], stage_key: str = "stage3", trainable: bool = False):
+    def __init__(self, ckpt_path: Optional[str], trainable: bool = False):
         super().__init__()
-        self.stage_key = stage_key
-        self.feature = FeatureNet0(base_channels=8, stride=4, num_stage=3)
+        self.model = AdaMVSNet(ndepths=[48, 32, 8], depth_intervals_ratio=[4, 2, 1], share_cr=False, cr_base_chs=[8, 8, 8])
         if ckpt_path and os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             model_state = ckpt.get("model", ckpt)
-            feature_state = _extract_adamvs_feature_state(model_state)
-            missing, unexpected = self.feature.load_state_dict(feature_state, strict=False)
+            missing, unexpected = self.model.load_state_dict(model_state, strict=False)
             logger.info(
-                "Loaded Ada-MVS feature from %s (missing=%d, unexpected=%d)",
+                "Loaded Ada-MVS pre-depth model from %s (missing=%d, unexpected=%d)",
                 ckpt_path,
                 len(missing),
                 len(unexpected),
             )
         else:
-            logger.warning("Ada-MVS checkpoint not found, using random feature encoder: %s", ckpt_path)
+            logger.warning("Ada-MVS checkpoint not found, using random depth-branch model: %s", ckpt_path)
 
         if trainable:
-            logger.warning("Ada-MVS encoder is frozen in this recipe; ignoring trainable=True")
+            logger.warning("Ada-MVS branch is frozen in this recipe; ignoring trainable=True")
 
-        self.feature.eval()
-        for p in self.feature.parameters():
+        self.model.eval()
+        for p in self.model.parameters():
             p.requires_grad = False
 
-    def forward(self, image_b3hw: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        images_bnvchw: torch.Tensor,
+        extrinsics: torch.Tensor,
+        intrinsics: torch.Tensor,
+        depth_gt: torch.Tensor,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        proj_matrices = _build_adamvs_proj_matrices(extrinsics, intrinsics)
+        depth_values = _build_adamvs_depth_values(depth_gt, valid_mask, num_depth=48)
         with torch.no_grad():
-            feat_dict = self.feature(image_b3hw)
-        if self.stage_key not in feat_dict:
-            raise KeyError(f"Ada-MVS feature stage '{self.stage_key}' not found. keys={list(feat_dict.keys())}")
-        return feat_dict[self.stage_key]
+            outputs = self.model(images_bnvchw, proj_matrices, depth_values, return_pre_depth_feature=True)
+        feature_map = {
+            "stage2": outputs.get("pre_depth_feature_stage2", None),
+            "stage3": outputs.get("pre_depth_feature_stage3", None),
+        }
+        if feature_map["stage3"] is None:
+            raise RuntimeError("Ada-MVS forward did not return stage3 pre-depth feature")
+        if feature_map["stage2"] is None:
+            feature_map["stage2"] = feature_map["stage3"]
+        return feature_map
 
 
 class DA3MVSFusionHead(nn.Module):
@@ -260,73 +321,115 @@ class DA3MVSFusionHead(nn.Module):
 
 
 class CrossAttentionFusionHead(nn.Module):
-    """Cross-attention fusion for DA3 pre-head and frozen Ada-MVS features.
+    """Multi-scale cross-attention fusion for DA3 and Ada-MVS depth features.
 
-    The DA3 feature acts as the query stream, while the Ada-MVS feature acts
-    as the key/value stream. To keep the cost bounded at WHU-OMVS resolution,
-    attention is computed on an adaptively pooled token grid and then lifted
-    back to the original feature size.
+    The head fuses two DA3 features and two Ada-MVS pre-depth features, which
+    makes it closer to the requested "前一层或者几层特征" fusion recipe.
     """
 
-    def __init__(self, da3_in_dim: int, ada_in_dim: int, fusion_dim: int = 128, num_heads: int = 4):
+    def __init__(self, da3_in_dims, ada_in_dims, fusion_dim: int = 128, num_heads: int = 4):
         super().__init__()
-        self.da3_proj = nn.Conv2d(da3_in_dim, fusion_dim, kernel_size=1)
-        self.ada_proj = nn.Conv2d(ada_in_dim, fusion_dim, kernel_size=1)
+        if isinstance(da3_in_dims, int):
+            da3_in_dims = [da3_in_dims, da3_in_dims]
+        if isinstance(ada_in_dims, int):
+            ada_in_dims = [ada_in_dims, ada_in_dims]
+        self.da3_proj = nn.ModuleList([nn.Conv2d(dim, fusion_dim, kernel_size=1) for dim in da3_in_dims])
+        self.ada_proj = nn.ModuleList([nn.Conv2d(dim, fusion_dim, kernel_size=1) for dim in ada_in_dims])
 
-        self.da3_to_ada_attn = nn.MultiheadAttention(fusion_dim, num_heads=num_heads, batch_first=True)
-        self.ada_to_da3_attn = nn.MultiheadAttention(fusion_dim, num_heads=num_heads, batch_first=True)
-        self.da3_norm = nn.LayerNorm(fusion_dim)
-        self.ada_norm = nn.LayerNorm(fusion_dim)
+        self.high_da3_attn = nn.MultiheadAttention(fusion_dim, num_heads=num_heads, batch_first=True)
+        self.high_ada_attn = nn.MultiheadAttention(fusion_dim, num_heads=num_heads, batch_first=True)
+        self.low_da3_attn = nn.MultiheadAttention(fusion_dim, num_heads=num_heads, batch_first=True)
+        self.low_ada_attn = nn.MultiheadAttention(fusion_dim, num_heads=num_heads, batch_first=True)
+
+        self.high_da3_norm = nn.LayerNorm(fusion_dim)
+        self.high_ada_norm = nn.LayerNorm(fusion_dim)
+        self.low_da3_norm = nn.LayerNorm(fusion_dim)
+        self.low_ada_norm = nn.LayerNorm(fusion_dim)
 
         self.refine = nn.Sequential(
-            nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
+            nn.Conv2d(fusion_dim * 4, fusion_dim, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(fusion_dim, fusion_dim, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
         )
         self.delta_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
         self.gate_head = nn.Conv2d(fusion_dim, 1, kernel_size=1)
+        self.residual_gate = nn.Conv2d(fusion_dim, 1, kernel_size=1)
 
         nn.init.zeros_(self.delta_head.weight)
         nn.init.zeros_(self.delta_head.bias)
         nn.init.zeros_(self.gate_head.weight)
         nn.init.constant_(self.gate_head.bias, -2.0)
+        nn.init.zeros_(self.residual_gate.weight)
+        nn.init.constant_(self.residual_gate.bias, -1.0)
 
-    def _attn_hw(self, target_hw: Tuple[int, int]) -> Tuple[int, int]:
+    def _attn_hw(self, target_hw: Tuple[int, int], scale: int) -> Tuple[int, int]:
         h, w = target_hw
-        return max(8, h // 4), max(8, w // 4)
+        return max(4, h // scale), max(4, w // scale)
 
-    def forward(self, da3_pre_head_feat: torch.Tensor, adamvs_feat: torch.Tensor, base_metric_depth: torch.Tensor):
-        target_hw = da3_pre_head_feat.shape[-2:]
-        if adamvs_feat.shape[-2:] != target_hw:
-            adamvs_feat = F.interpolate(adamvs_feat, size=target_hw, mode="bilinear", align_corners=True)
+    def _cross_context(self, da3_feat: torch.Tensor, ada_feat: torch.Tensor, attn: nn.MultiheadAttention, reverse_attn: nn.MultiheadAttention, da3_norm: nn.LayerNorm, ada_norm: nn.LayerNorm, scale: int) -> torch.Tensor:
+        target_hw = da3_feat.shape[-2:]
+        att_h, att_w = self._attn_hw(target_hw, scale)
+        da3_tokens = F.adaptive_avg_pool2d(da3_feat, (att_h, att_w)).flatten(2).transpose(1, 2)
+        ada_tokens = F.adaptive_avg_pool2d(ada_feat, (att_h, att_w)).flatten(2).transpose(1, 2)
 
-        da3_p = self.da3_proj(da3_pre_head_feat)
-        ada_p = self.ada_proj(adamvs_feat)
+        da3_ctx, _ = attn(da3_norm(da3_tokens), ada_norm(ada_tokens), ada_norm(ada_tokens), need_weights=False)
+        ada_ctx, _ = reverse_attn(ada_norm(ada_tokens), da3_norm(da3_tokens), da3_norm(da3_tokens), need_weights=False)
 
-        att_h, att_w = self._attn_hw(target_hw)
-        da3_tokens = F.adaptive_avg_pool2d(da3_p, (att_h, att_w)).flatten(2).transpose(1, 2)
-        ada_tokens = F.adaptive_avg_pool2d(ada_p, (att_h, att_w)).flatten(2).transpose(1, 2)
+        da3_ctx = da3_ctx.transpose(1, 2).reshape(da3_feat.shape[0], -1, att_h, att_w)
+        ada_ctx = ada_ctx.transpose(1, 2).reshape(ada_feat.shape[0], -1, att_h, att_w)
+        return 0.5 * (da3_ctx + ada_ctx)
 
-        da3_q = self.da3_norm(da3_tokens)
-        ada_kv = self.ada_norm(ada_tokens)
-        da3_ctx, _ = self.da3_to_ada_attn(da3_q, ada_kv, ada_kv, need_weights=False)
+    def forward(self, da3_feats, adamvs_feats, base_metric_depth: torch.Tensor):
+        if not isinstance(da3_feats, (list, tuple)):
+            da3_feats = [da3_feats]
+        if not isinstance(adamvs_feats, (list, tuple)):
+            adamvs_feats = [adamvs_feats]
+        if len(da3_feats) == 1:
+            da3_feats = [da3_feats[0], da3_feats[0]]
+        if len(adamvs_feats) == 1:
+            adamvs_feats = [adamvs_feats[0], adamvs_feats[0]]
 
-        ada_q = self.ada_norm(ada_tokens)
-        da3_kv = self.da3_norm(da3_tokens)
-        ada_ctx, _ = self.ada_to_da3_attn(ada_q, da3_kv, da3_kv, need_weights=False)
+        da3_low, da3_high = da3_feats[0], da3_feats[-1]
+        ada_low, ada_high = adamvs_feats[0], adamvs_feats[-1]
+        target_hw = da3_high.shape[-2:]
 
-        da3_ctx = da3_ctx.transpose(1, 2).reshape(da3_p.shape[0], -1, att_h, att_w)
-        ada_ctx = ada_ctx.transpose(1, 2).reshape(ada_p.shape[0], -1, att_h, att_w)
-        cross_ctx = 0.5 * (da3_ctx + ada_ctx)
-        cross_ctx = F.interpolate(cross_ctx, size=target_hw, mode="bilinear", align_corners=True)
+        da3_low_p = self.da3_proj[0](F.interpolate(da3_low, size=target_hw, mode="bilinear", align_corners=True) if da3_low.shape[-2:] != target_hw else da3_low)
+        da3_high_p = self.da3_proj[-1](da3_high)
+        ada_low_p = self.ada_proj[0](F.interpolate(ada_low, size=target_hw, mode="bilinear", align_corners=True) if ada_low.shape[-2:] != target_hw else ada_low)
+        ada_high_p = self.ada_proj[-1](F.interpolate(ada_high, size=target_hw, mode="bilinear", align_corners=True) if ada_high.shape[-2:] != target_hw else ada_high)
 
-        fused = self.refine(da3_p + cross_ctx)
+        high_ctx = self._cross_context(
+            da3_high_p, ada_high_p,
+            self.high_da3_attn, self.high_ada_attn,
+            self.high_da3_norm, self.high_ada_norm,
+            scale=4,
+        )
+        low_ctx = self._cross_context(
+            da3_low_p, ada_low_p,
+            self.low_da3_attn, self.low_ada_attn,
+            self.low_da3_norm, self.low_ada_norm,
+            scale=8,
+        )
+
+        if low_ctx.shape[-2:] != target_hw:
+            low_ctx = F.interpolate(low_ctx, size=target_hw, mode="bilinear", align_corners=True)
+
+        residual = 0.5 * (da3_low_p + ada_low_p) + 0.5 * (da3_high_p + ada_high_p)
+        fused = self.refine(torch.cat([da3_high_p, ada_high_p, high_ctx + residual, low_ctx], dim=1))
 
         delta = self.delta_head(fused).squeeze(1)
-        gate = torch.sigmoid(self.gate_head(fused).squeeze(1))
+        gate = torch.sigmoid(self.gate_head(fused).squeeze(1) + 0.5 * self.residual_gate(fused).squeeze(1))
+
+        if base_metric_depth.shape[-2:] != target_hw:
+            base_metric_depth = F.interpolate(
+                base_metric_depth.unsqueeze(1), size=target_hw, mode="bilinear", align_corners=True
+            ).squeeze(1)
         fused_metric = torch.clamp(base_metric_depth + gate * delta, min=1e-3)
-        return fused_metric, {"fusion_delta": delta, "fusion_gate": gate}
+        return fused_metric, {
+            "fusion_delta": delta,
+            "fusion_gate": gate,
+        }
 
 
 class LayerAttentionFusionHead(CrossAttentionFusionHead):
@@ -340,7 +443,7 @@ class DA3MVSForMetricDepth(nn.Module):
         self,
         da3_model,
         scale_shift: MetricScaleShift,
-        adamvs_encoder: AdaMVSFeatureEncoder,
+        adamvs_encoder: AdaMVSPreDepthFeatureExtractor,
         fusion_head: DA3MVSFusionHead,
     ):
         super().__init__()
@@ -348,20 +451,30 @@ class DA3MVSForMetricDepth(nn.Module):
         self.scale_shift = scale_shift
         self.adamvs_encoder = adamvs_encoder
         self.fusion_head = fusion_head
-        self._last_pre_head_feat: Optional[torch.Tensor] = None
+        self._last_da3_low_feat: Optional[torch.Tensor] = None
+        self._last_da3_high_feat: Optional[torch.Tensor] = None
 
         head = self.da3.model.head
         if not hasattr(head, "scratch") or not hasattr(head.scratch, "output_conv2"):
             raise RuntimeError("DA3 head does not expose scratch.output_conv2, cannot extract pre-head feature")
-        pre_head_module = head.scratch.output_conv2[0]
-        self._pre_head_hook = pre_head_module.register_forward_hook(self._cache_pre_head_feature)
+        self._low_feat_hook = head.scratch.output_conv1.register_forward_hook(self._cache_da3_low_feature)
+        self._high_feat_hook = head.scratch.output_conv2[0].register_forward_hook(self._cache_da3_high_feature)
 
-    def _cache_pre_head_feature(self, module, inputs, outputs):
+    def _cache_da3_low_feature(self, module, inputs, outputs):
+        if isinstance(outputs, torch.Tensor):
+            self._last_da3_low_feat = outputs
+
+    def _cache_da3_high_feature(self, module, inputs, outputs):
         if inputs and isinstance(inputs[0], torch.Tensor):
-            self._last_pre_head_feat = inputs[0]
+            self._last_da3_high_feat = inputs[0]
 
-    def forward(self, images_input, extrinsics=None, intrinsics=None):
-        self._last_pre_head_feat = None
+    def forward(self, images_input, extrinsics=None, intrinsics=None, depth_gt=None, valid_mask=None):
+        self._last_da3_low_feat = None
+        self._last_da3_high_feat = None
+        if extrinsics is not None and extrinsics.ndim == 3:
+            extrinsics = extrinsics.unsqueeze(1)
+        if intrinsics is not None and intrinsics.ndim == 3:
+            intrinsics = intrinsics.unsqueeze(1)
         autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         with torch.amp.autocast("cuda", dtype=autocast_dtype):
             if extrinsics is not None and intrinsics is not None:
@@ -388,8 +501,8 @@ class DA3MVSForMetricDepth(nn.Module):
             metric_shift = output.get("metric_shift", None)
             metric_depth = output.get("metric_depth", None)
 
-        if self._last_pre_head_feat is None:
-            raise RuntimeError("Failed to capture DA3 pre-head feature via hook")
+        if self._last_da3_low_feat is None or self._last_da3_high_feat is None:
+            raise RuntimeError("Failed to capture DA3 multi-scale pre-head features via hooks")
 
         pred_depth = pred_depth.float()
         if metric_depth is not None:
@@ -404,9 +517,17 @@ class DA3MVSForMetricDepth(nn.Module):
                 pred_metric = pred_metric + metric_residual.float()
 
         B, S = images_input.shape[:2]
-        da3_pre_feat = self._last_pre_head_feat.view(B, S, *self._last_pre_head_feat.shape[1:])[:, 0].float()
-        adamvs_feat = self.adamvs_encoder(images_input[:, 0].float())
-        pred_metric_fused, fusion_aux = self.fusion_head(da3_pre_feat, adamvs_feat.float(), pred_metric)
+        da3_low_feat = self._last_da3_low_feat.view(B, S, *self._last_da3_low_feat.shape[1:])[:, 0].float()
+        da3_high_feat = self._last_da3_high_feat.view(B, S, *self._last_da3_high_feat.shape[1:])[:, 0].float()
+        if extrinsics is None or intrinsics is None or depth_gt is None:
+            raise ValueError("Ada-MVS pre-depth fusion requires extrinsics, intrinsics, and depth_gt")
+        adamvs_images = images_input.squeeze(1) if images_input.ndim == 6 else images_input
+        adamvs_feats = self.adamvs_encoder(adamvs_images.float(), extrinsics, intrinsics, depth_gt, valid_mask)
+        pred_metric_fused, fusion_aux = self.fusion_head(
+            [da3_low_feat, da3_high_feat],
+            [adamvs_feats["stage2"].float(), adamvs_feats["stage3"].float()],
+            pred_metric,
+        )
 
         aux_info = {
             "metric_log_scale": metric_log_scale,
@@ -450,6 +571,28 @@ def _squeeze_spatial_map(tensor: Optional[torch.Tensor]) -> Optional[torch.Tenso
     if tensor.ndim == 3 and tensor.shape[0] == 1:
         return tensor[0]
     return tensor
+
+
+def _safe_tensor_stats(values: torch.Tensor, prefix: str) -> Dict[str, float]:
+    if values.numel() == 0:
+        return {
+            f"{prefix}_mean": 0.0,
+            f"{prefix}_std": 0.0,
+            f"{prefix}_min": 0.0,
+            f"{prefix}_max": 0.0,
+            f"{prefix}_median": 0.0,
+        }
+    stats = {
+        f"{prefix}_mean": float(values.mean().item()),
+        f"{prefix}_min": float(values.min().item()),
+        f"{prefix}_max": float(values.max().item()),
+        f"{prefix}_median": float(values.median().item()),
+    }
+    if values.numel() > 1:
+        stats[f"{prefix}_std"] = float(values.std(unbiased=False).item())
+    else:
+        stats[f"{prefix}_std"] = 0.0
+    return stats
 
 def collect_depth_distribution(
     pred_depth: torch.Tensor,
@@ -621,9 +764,17 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
         images = batch["image"].to(device)
         depth_gt = batch["depth_gt"].to(device)
         valid_mask = batch["valid_mask"].to(device)
+        extrinsics = batch["extrinsics"].to(device)
+        intrinsics = batch["intrinsics"].to(device)
         images_input = images.unsqueeze(1)
 
-        pred_depth, pred_metric, pred_conf, pred_sky, aux_out = raw(images_input)
+        pred_depth, pred_metric, pred_conf, pred_sky, aux_out = raw(
+            images_input,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            depth_gt=depth_gt,
+            valid_mask=valid_mask,
+        )
 
         if pred_depth.shape[-2:] != depth_gt.shape[-2:]:
             pred_depth = F.interpolate(
@@ -662,9 +813,9 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
             logged_depth_images = True
             n_vis = min(images.shape[0], 2)
             for vi in range(n_vis):
-                gt_vis = np.squeeze(depth_gt[vi].cpu().numpy())
-                pred_vis = np.squeeze(pred_metric[vi].cpu().numpy())
-                mask_vis = np.squeeze(valid_mask[vi].cpu().numpy().astype(bool))
+                gt_vis = _squeeze_spatial_map(depth_gt[vi]).cpu().numpy()
+                pred_vis = _squeeze_spatial_map(pred_metric[vi]).cpu().numpy()
+                mask_vis = _squeeze_spatial_map(valid_mask[vi]).cpu().numpy().astype(bool)
                 gt_valid = gt_vis[mask_vis]
                 pred_valid = pred_vis[mask_vis]
                 scale = np.median(gt_valid) / max(np.median(pred_valid), 1e-6) if pred_valid.size > 0 else 1.0
@@ -735,7 +886,7 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
     return metrics
 
 
-def set_phase_grads(model, phase, train_adamvs: bool = False, train_da3_core: bool = True):
+def set_trainable_parts(model):
     raw = get_raw_model(model)
     da3_model = raw.da3.model
 
@@ -745,16 +896,15 @@ def set_phase_grads(model, phase, train_adamvs: bool = False, train_da3_core: bo
         for param in raw.scale_shift.parameters():
             param.requires_grad = True
 
-    if train_da3_core:
-        head_modules = [getattr(da3_model, "head", None), getattr(da3_model, "cam_enc", None), getattr(da3_model, "cam_dec", None)]
-        for module in head_modules:
-            if module is not None:
-                for param in module.parameters():
-                    param.requires_grad = True
-
-        for name, param in da3_model.named_parameters():
-            if "lora" in name.lower():
+    head_modules = [getattr(da3_model, "head", None), getattr(da3_model, "cam_enc", None), getattr(da3_model, "cam_dec", None)]
+    for module in head_modules:
+        if module is not None:
+            for param in module.parameters():
                 param.requires_grad = True
+
+    for name, param in da3_model.named_parameters():
+        if "lora" in name.lower():
+            param.requires_grad = True
 
     for p in raw.fusion_head.parameters():
         p.requires_grad = True
@@ -774,19 +924,17 @@ def main():
     parser.add_argument("--pretrained_path", type=str, default=None)
     parser.add_argument("--da3_lora_checkpoint", type=str, default=None)
     parser.add_argument("--process_res", type=int, default=504)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=25)
-    parser.add_argument("--lr", type=float, default=7e-6)
+    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--lr", type=float, default=4e-6)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--warmup_steps", type=int, default=300)
-    parser.add_argument("--grad_accum_steps", type=int, default=4)
+    parser.add_argument("--warmup_steps", type=int, default=800)
+    parser.add_argument("--grad_accum_steps", type=int, default=2)
     parser.add_argument("--lora_rank", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--lora_target_modules", nargs="+", default=["qkv", "proj"])
-    parser.add_argument("--phase1_epochs", type=int, default=2)
-    parser.add_argument("--phase2_epochs", type=int, default=10)
     parser.add_argument("--adapter_hidden_dim", type=int, default=64)
     parser.add_argument("--adapter_depth_norm", type=float, default=600.0)
     parser.add_argument(
@@ -794,28 +942,18 @@ def main():
         type=str,
         default="weights/adamvs/adamvs_whuomvs/model_000019_0.1339.ckpt",
     )
-    parser.add_argument(
-        "--adamvs_feature_stage",
-        type=str,
-        default="stage3",
-        choices=["stage1", "stage2", "stage3"],
-    )
     parser.add_argument("--fusion_dim", type=int, default=128)
     parser.add_argument("--fusion_type", type=str, default="cross_attention", choices=["conv", "cross_attention", "layer_attention"])
-    parser.add_argument("--train_adamvs", action="store_true", help="Reserved; Ada-MVS encoder stays frozen in this single-view fusion recipe")
-    parser.add_argument("--train_da3_core", action="store_true", help="If set, DA3 head/cam/LoRA parameters remain trainable even when warm-starting from a LoRA checkpoint")
     parser.add_argument("--loss_profile", type=str, default="metric_v4", choices=["metric_v4"])
-    parser.add_argument("--relative_si_weight", type=float, default=0.4)
-    parser.add_argument("--metric_si_weight", type=float, default=1.0)
-    parser.add_argument("--phase1_metric_si_weight", type=float, default=0.0)
-    parser.add_argument("--phase3_metric_si_weight", type=float, default=0.0)
-    parser.add_argument("--logl1_weight", type=float, default=5.0)
-    parser.add_argument("--l1_weight", type=float, default=0.8)
-    parser.add_argument("--absrel_weight", type=float, default=0.3)
-    parser.add_argument("--gradient_weight", type=float, default=0.25)
-    parser.add_argument("--range_weight", type=float, default=0.03)
-    parser.add_argument("--confidence_weight", type=float, default=0.15)
-    parser.add_argument("--sky_weight", type=float, default=0.08)
+    parser.add_argument("--relative_si_weight", type=float, default=0.3)
+    parser.add_argument("--metric_si_weight", type=float, default=1.2)
+    parser.add_argument("--logl1_weight", type=float, default=4.0)
+    parser.add_argument("--l1_weight", type=float, default=0.7)
+    parser.add_argument("--absrel_weight", type=float, default=0.2)
+    parser.add_argument("--gradient_weight", type=float, default=0.15)
+    parser.add_argument("--range_weight", type=float, default=0.02)
+    parser.add_argument("--confidence_weight", type=float, default=0.1)
+    parser.add_argument("--sky_weight", type=float, default=0.05)
     parser.add_argument("--confidence_tau", type=float, default=120.0)
     parser.add_argument("--sky_threshold", type=float, default=0.3)
     parser.add_argument("--far_depth_start", type=float, default=350.0)
@@ -830,12 +968,9 @@ def main():
     parser.add_argument("--save_every_n_epochs", type=int, default=5)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--max_grad_norm", type=float, default=0.8)
-    parser.add_argument("--phase1_lr_scale", type=float, default=0.8)
-    parser.add_argument("--phase2_lr_scale", type=float, default=1.0)
-    parser.add_argument("--phase3_lr_scale", type=float, default=0.9)
     parser.add_argument("--ema_alpha", type=float, default=0.2)
-    parser.add_argument("--early_stop_patience", type=int, default=6)
-    parser.add_argument("--early_stop_min_delta", type=float, default=0.008)
+    parser.add_argument("--early_stop_patience", type=int, default=10)
+    parser.add_argument("--early_stop_min_delta", type=float, default=0.003)
     parser.add_argument("--early_stop_absrel_min_delta", type=float, default=0.0005)
     args = parser.parse_args()
 
@@ -886,26 +1021,20 @@ def main():
 
     scale_shift = MetricScaleShift(init_scale=1.0, init_shift=0.0).to(device)
     adamvs_ckpt = str(Path(args.adamvs_ckpt).resolve()) if args.adamvs_ckpt else ""
-    adamvs_encoder = AdaMVSFeatureEncoder(
+    adamvs_encoder = AdaMVSPreDepthFeatureExtractor(
         ckpt_path=adamvs_ckpt,
-        stage_key=args.adamvs_feature_stage,
-        trainable=args.train_adamvs,
+        trainable=False,
     ).to(device)
-    adamvs_stage_channels = {
-        "stage1": 32,
-        "stage2": 16,
-        "stage3": 8,
-    }
     if args.fusion_type in {"cross_attention", "layer_attention"}:
         fusion_head = CrossAttentionFusionHead(
-            da3_in_dim=128,
-            ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
+            da3_in_dims=[64, 64],
+            ada_in_dims=[16, 8],
             fusion_dim=args.fusion_dim,
         ).to(device)
     else:
         fusion_head = DA3MVSFusionHead(
-            da3_in_dim=128,
-            ada_in_dim=adamvs_stage_channels[args.adamvs_feature_stage],
+            da3_in_dim=64,
+            ada_in_dim=8,
             fusion_dim=args.fusion_dim,
         ).to(device)
 
@@ -923,8 +1052,7 @@ def main():
     if args.da3_lora_checkpoint:
         model = load_da3_lora_checkpoint(model, args.da3_lora_checkpoint)
 
-    train_da3_core = bool(args.train_da3_core) or not bool(args.da3_lora_checkpoint)
-    set_phase_grads(model, 1, train_adamvs=args.train_adamvs, train_da3_core=train_da3_core)
+    set_trainable_parts(model)
 
     raw_model = get_raw_model(model)
     head_params = count_params_safe(raw_model.da3.model.head)
@@ -933,7 +1061,7 @@ def main():
     logger.info("Trainable: %d / %d (%.2f%%) | Head: %d | Frozen helper: %d",
                 trainable_params, total_params, 100.0 * trainable_params / total_params,
                 head_params, sum(p.numel() for p in raw_model.scale_shift.parameters()))
-    logger.info("Metric fusion mode with Ada-MVS feature fusion enabled.")
+    logger.info("Metric fusion mode with Ada-MVS pre-depth feature fusion enabled.")
 
     criterion = MetricDepthLossV4(
         relative_si_weight=args.relative_si_weight,
@@ -1030,7 +1158,7 @@ def main():
     logger.info("  Epochs: %d (single-stage metric fusion)", args.epochs)
     logger.info("  LR: %.2e, Warmup: %d steps, Grad accum: %d",
                 args.lr, warmup_steps, args.grad_accum_steps)
-    logger.info("  Loss profile: %s | DA3 pre-head + Ada-MVS(%s) cross-attention fusion", args.loss_profile, args.adamvs_feature_stage)
+    logger.info("  Loss profile: %s | DA3 pre-head + Ada-MVS pre-depth fusion", args.loss_profile)
     logger.info("  LoRA: rank=%d, alpha=%d", args.lora_rank, args.lora_alpha)
     logger.info("  Ada-MVS ckpt: %s | fusion_dim=%d", adamvs_ckpt, args.fusion_dim)
     logger.info("  Loss: si=%.1f logl1=%.1f l1=%.1f grad=%.2f range=%.2f",
@@ -1063,9 +1191,17 @@ def main():
             images = batch["image"].to(device)
             depth_gt = batch["depth_gt"].to(device)
             valid_mask = batch["valid_mask"].to(device)
+            extrinsics = batch["extrinsics"].to(device)
+            intrinsics = batch["intrinsics"].to(device)
             images_input = images.unsqueeze(1)
 
-            pred_depth, pred_metric, _, _, aux_out = model(images_input)
+            pred_depth, pred_metric, _, _, aux_out = model(
+                images_input,
+                extrinsics=extrinsics,
+                intrinsics=intrinsics,
+                depth_gt=depth_gt,
+                valid_mask=valid_mask,
+            )
 
             if pred_depth.shape[-2:] != depth_gt.shape[-2:]:
                 pred_depth = F.interpolate(
