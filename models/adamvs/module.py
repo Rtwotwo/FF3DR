@@ -27,6 +27,10 @@ class ConvGRUCell(nn.Module):
         if(h is None):
             h = torch.zeros((N, HC, H, W), dtype=torch.float, device=x.device)
 
+        # Ensure hidden state spatial size matches input; if not, resize hidden state.
+        if h.shape[2] != H or h.shape[3] != W:
+            h = F.interpolate(h, size=(H, W), mode='bilinear', align_corners=False)
+
         input = torch.cat((x, h), dim=1)
         gates = self.conv_gates(input)
 
@@ -99,6 +103,9 @@ class ConvGRUCell2(nn.Module):
         HC = self.output_channel
         if(h is None):
             h = torch.zeros((N, HC, H, W), dtype=torch.float, device=x.device)
+        # Resize hidden state if spatial dims mismatch (defensive fix).
+        if h.shape[2] != H or h.shape[3] != W:
+            h = F.interpolate(h, size=(H, W), mode='bilinear', align_corners=False)
         r, u = self.gates(x, h)
         o = self.output(x, h, r, u)
         y = self.activation(o)

@@ -275,6 +275,7 @@ class AdaMVSPreDepthFeatureExtractor(nn.Module):
 class DA3MVSFusionHead(nn.Module):
     def __init__(self, da3_in_dim: int, ada_in_dim: int, fusion_dim: int = 128):
         super().__init__()
+        self.fusion_dim = fusion_dim
         self.da3_proj = nn.Conv2d(da3_in_dim, fusion_dim, kernel_size=1, stride=1, padding=0)
         self.ada_proj = nn.Conv2d(ada_in_dim, fusion_dim, kernel_size=1, stride=1, padding=0)
         self.fuse = nn.Sequential(
@@ -307,6 +308,12 @@ class DA3MVSFusionHead(nn.Module):
                 align_corners=True,
             )
 
+        # Lazy-adapt projection convs if channel dims mismatch
+        if self.da3_proj.in_channels != da3_pre_head_feat.shape[1]:
+            self.da3_proj = nn.Conv2d(da3_pre_head_feat.shape[1], self.fusion_dim, kernel_size=1).to(da3_pre_head_feat.device)
+        if self.ada_proj.in_channels != adamvs_feat.shape[1]:
+            self.ada_proj = nn.Conv2d(adamvs_feat.shape[1], self.fusion_dim, kernel_size=1).to(adamvs_feat.device)
+
         da3_proj = self.da3_proj(da3_pre_head_feat)
         ada_proj = self.ada_proj(adamvs_feat)
         fused_feat = self.fuse(torch.cat([da3_proj, ada_proj], dim=1))
@@ -329,6 +336,7 @@ class CrossAttentionFusionHead(nn.Module):
 
     def __init__(self, da3_in_dims, ada_in_dims, fusion_dim: int = 128, num_heads: int = 4):
         super().__init__()
+        self.fusion_dim = fusion_dim
         if isinstance(da3_in_dims, int):
             da3_in_dims = [da3_in_dims, da3_in_dims]
         if isinstance(ada_in_dims, int):
@@ -394,6 +402,16 @@ class CrossAttentionFusionHead(nn.Module):
         ada_low, ada_high = adamvs_feats[0], adamvs_feats[-1]
         target_hw = da3_high.shape[-2:]
 
+        # Lazily adapt projection convs if input channel counts differ from initialized ones
+        if self.da3_proj[0].in_channels != da3_low.shape[1]:
+            self.da3_proj[0] = nn.Conv2d(da3_low.shape[1], self.fusion_dim, kernel_size=1).to(da3_low.device)
+        if self.da3_proj[-1].in_channels != da3_high.shape[1]:
+            self.da3_proj[-1] = nn.Conv2d(da3_high.shape[1], self.fusion_dim, kernel_size=1).to(da3_high.device)
+        if self.ada_proj[0].in_channels != ada_low.shape[1]:
+            self.ada_proj[0] = nn.Conv2d(ada_low.shape[1], self.fusion_dim, kernel_size=1).to(ada_low.device)
+        if self.ada_proj[-1].in_channels != ada_high.shape[1]:
+            self.ada_proj[-1] = nn.Conv2d(ada_high.shape[1], self.fusion_dim, kernel_size=1).to(ada_high.device)
+
         da3_low_p = self.da3_proj[0](F.interpolate(da3_low, size=target_hw, mode="bilinear", align_corners=True) if da3_low.shape[-2:] != target_hw else da3_low)
         da3_high_p = self.da3_proj[-1](da3_high)
         ada_low_p = self.ada_proj[0](F.interpolate(ada_low, size=target_hw, mode="bilinear", align_corners=True) if ada_low.shape[-2:] != target_hw else ada_low)
@@ -414,6 +432,8 @@ class CrossAttentionFusionHead(nn.Module):
 
         if low_ctx.shape[-2:] != target_hw:
             low_ctx = F.interpolate(low_ctx, size=target_hw, mode="bilinear", align_corners=True)
+        if high_ctx.shape[-2:] != target_hw:
+            high_ctx = F.interpolate(high_ctx, size=target_hw, mode="bilinear", align_corners=True)
 
         residual = 0.5 * (da3_low_p + ada_low_p) + 0.5 * (da3_high_p + ada_high_p)
         fused = self.refine(torch.cat([da3_high_p, ada_high_p, high_ctx + residual, low_ctx], dim=1))
@@ -602,6 +622,18 @@ def collect_depth_distribution(
     pred_depth = _squeeze_spatial_map(pred_depth).detach()
     gt_depth = _squeeze_spatial_map(gt_depth).detach()
     valid_mask = _squeeze_spatial_map(valid_mask).detach().bool()
+
+    # Normalize leading singleton batch dims: if one tensor is 2D and another is 3D with size[0]==1, squeeze the 3D to 2D
+    if gt_depth.ndim == 2:
+        if pred_depth.ndim == 3 and pred_depth.shape[0] == 1:
+            pred_depth = pred_depth[0]
+        if valid_mask.ndim == 3 and valid_mask.shape[0] == 1:
+            valid_mask = valid_mask[0]
+    if pred_depth.ndim == 2:
+        if gt_depth.ndim == 3 and gt_depth.shape[0] == 1:
+            gt_depth = gt_depth[0]
+        if valid_mask.ndim == 3 and valid_mask.shape[0] == 1:
+            valid_mask = valid_mask[0]
 
     valid_mask = valid_mask & torch.isfinite(pred_depth) & torch.isfinite(gt_depth) & (gt_depth > 1.0)
     if valid_mask.sum() < 10:

@@ -185,6 +185,9 @@ class CostRegNetRED(nn.Module):
             conv_cost2 = self.conv2(reg_cost1)
             reg_cost2, state2 = self.conv_gru2(conv_cost2, state2)
             up_cost1 = self.upconv1(reg_cost2)
+            # Ensure spatial sizes match before addition (defensive fix for odd/even sizes)
+            if up_cost1.shape[2] != reg_cost1.shape[2] or up_cost1.shape[3] != reg_cost1.shape[3]:
+                up_cost1 = F.interpolate(up_cost1, size=(reg_cost1.shape[2], reg_cost1.shape[3]), mode='bilinear', align_corners=False)
             up_cost11 = F.relu(torch.add(up_cost1, reg_cost1), inplace=True)
             reg_cost = self.upconv2d(up_cost11)
             depth_costs.append(reg_cost)
@@ -325,6 +328,7 @@ class DepthNet0(nn.Module):
 
             fused_interm /= weight_sum
             pair_confidence = confidence_map
+            pre_depth_feature = fused_interm.mean(dim=2).contiguous()
 
         # step 3. cost volume regularization
         prob_volume = self.reg_fuse(fused_interm)
