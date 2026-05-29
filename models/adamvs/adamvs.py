@@ -267,7 +267,7 @@ class DepthNet0(nn.Module):
         if confidence_map is None:
             for src_fea, src_proj in zip(src_features, src_projs):
                 warped_volume = homo_warping_float(src_fea, src_proj, ref_proj, depth_values)
-                warped_volume2 = ref_volume*warped_volume
+                warped_volume2 = ref_volume * warped_volume
                 # warped_volume2 = groupwise_correlation(ref_volume, warped_volume, 8, 1)
                 warped_volume1 = warped_volume2.mean(dim=1)
                 score_volume = self.reg(warped_volume1)
@@ -286,19 +286,43 @@ class DepthNet0(nn.Module):
                 weight_sum = weight_sum + weight
                 fused_interm = fused_interm + warped_volume2 * weight
 
-            del warped_volume, warped_volume2
+            # safe delete temporaries if they exist
+            if "warped_volume" in locals():
+                del warped_volume
+            if "warped_volume2" in locals():
+                del warped_volume2
+
+            # If no source views or weight_sum is zero, fallback to reference-only fused_interm
+            if (not torch.is_tensor(weight_sum) and weight_sum == 0) or (
+                torch.is_tensor(weight_sum) and torch.sum(weight_sum) == 0
+            ):
+                fused_interm = ref_volume
+                weight_sum = torch.ones((fused_interm.shape[0], 1, fused_interm.shape[2], fused_interm.shape[3], fused_interm.shape[4]), device=fused_interm.device, dtype=fused_interm.dtype)
+
             fused_interm /= weight_sum
             pre_depth_feature = fused_interm.mean(dim=2).contiguous()
         else:
             for src_fea, src_proj, confidence in zip(src_features, src_projs, confidence_map):
                 warped_volume = homo_warping_float(src_fea, src_proj, ref_proj, depth_values)
-                warped_volume2 = ref_volume*warped_volume
+                warped_volume2 = ref_volume * warped_volume
                 # warped_volume2 = groupwise_correlation(ref_volume, warped_volume, 8, 1)  # [B, 8, D, H, W]
                 weight = F.interpolate(confidence, [h_num, w_num], mode='bilinear', align_corners=False)
                 weight_sum = weight_sum + weight.unsqueeze(1)  # n11hw
                 fused_interm = fused_interm + warped_volume2 * weight.unsqueeze(1)  # n8dhw
 
-            del warped_volume, warped_volume2
+            # safe delete temporaries if they exist
+            if "warped_volume" in locals():
+                del warped_volume
+            if "warped_volume2" in locals():
+                del warped_volume2
+
+            # If weight_sum is zero (unlikely but possible), fallback to reference-only fused_interm
+            if (not torch.is_tensor(weight_sum) and weight_sum == 0) or (
+                torch.is_tensor(weight_sum) and torch.sum(weight_sum) == 0
+            ):
+                fused_interm = ref_volume
+                weight_sum = torch.ones((fused_interm.shape[0], 1, fused_interm.shape[2], fused_interm.shape[3], fused_interm.shape[4]), device=fused_interm.device, dtype=fused_interm.dtype)
+
             fused_interm /= weight_sum
             pair_confidence = confidence_map
 
