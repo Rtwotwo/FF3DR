@@ -12,10 +12,10 @@
 #   OVERLAP         : overlap between chunks
 
 DATASET_PATH="/data2/dataset/Redal/work_feedforward_3drepo/dataset/MatrixCity"
-MODEL_NAME="depthanything3"
+MODEL_NAMES=('depthanything3' 'mapanything' 'pi3' 'vggt')
 CITY_SIZE="small_city"
-TRAIN_TEST_SPLIT="train"
-GPU_ID=6
+TRAIN_TEST_SPLIT="test"
+GPU_ID=4
 CHUNK_SIZE=40
 OVERLAP=16
 
@@ -56,25 +56,27 @@ echo " Chunk: ${CHUNK_SIZE}, Overlap: ${OVERLAP}"
 echo " GPU: ${GPU_ID}"
 echo "=============================================="
 
-for BLOCK in "${BLOCKS[@]}"; do
-    AREA_PATH="${DATASET_PATH}/${CITY_SIZE}/aerial/${TRAIN_TEST_SPLIT}"
-    OUTPUT_PATH="${PROJECT_ROOT}/exp/matrixcity/run_matrixcity_${MODEL_NAME}_${CITY_SIZE}_${TRAIN_TEST_SPLIT}_${BLOCK}"
+for MODEL_NAME in "${MODEL_NAMES[@]}"; do
+    for BLOCK in "${BLOCKS[@]}"; do
+        AREA_PATH="${DATASET_PATH}/${CITY_SIZE}/aerial/${TRAIN_TEST_SPLIT}"
+        OUTPUT_PATH="${PROJECT_ROOT}/exp/matrixcity/run_matrixcity_${MODEL_NAME}_${CITY_SIZE}_${TRAIN_TEST_SPLIT}_${BLOCK}"
 
-    if [ ! -d "${AREA_PATH}/${BLOCK}" ]; then
-        echo "[WARN $(date +"%Y-%m-%d %H:%M:%S")] Area path not found, skipping: ${AREA_PATH}/${BLOCK}"
-        continue
-    fi
+        if [ ! -d "${AREA_PATH}/${BLOCK}" ]; then
+            echo "[WARN $(date +"%Y-%m-%d %H:%M:%S")] Area path not found, skipping: ${AREA_PATH}/${BLOCK}"
+            continue
+        fi
 
-    echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${CITY_SIZE}/${TRAIN_TEST_SPLIT}/${BLOCK}..."
-    CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$INFERENCE_SCRIPT" \
-        --area_path "$AREA_PATH" \
-        --block_name "$BLOCK" \
-        --output_path "$OUTPUT_PATH" \
-        --model_name "$MODEL_NAME" \
-        --chunk_size "$CHUNK_SIZE" \
-        --overlap "$OVERLAP"
-    echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Finished: ${BLOCK}"
-    echo ""
+        echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Running inference for ${CITY_SIZE}/${TRAIN_TEST_SPLIT}/${BLOCK}..."
+        CUDA_VISIBLE_DEVICES=$GPU_ID python3 "$INFERENCE_SCRIPT" \
+            --area_path "$AREA_PATH" \
+            --block_name "$BLOCK" \
+            --output_path "$OUTPUT_PATH" \
+            --model_name "$MODEL_NAME" \
+            --chunk_size "$CHUNK_SIZE" \
+            --overlap "$OVERLAP"
+        echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Finished: ${BLOCK}"
+        echo ""
+    done
+
+    echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] All blocks done."
 done
-
-echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] All blocks done."

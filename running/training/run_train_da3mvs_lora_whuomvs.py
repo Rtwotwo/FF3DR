@@ -844,20 +844,32 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
         if not logged_depth_images and writer is not None:
             logged_depth_images = True
             n_vis = min(images.shape[0], 2)
+
+            def _vis_2d(tensor_like):
+                if isinstance(tensor_like, torch.Tensor):
+                    tensor_like = tensor_like.detach().cpu()
+                    if tensor_like.ndim == 4:
+                        tensor_like = tensor_like[0, 0]
+                    elif tensor_like.ndim == 3:
+                        tensor_like = tensor_like[0] if tensor_like.shape[0] != 1 else tensor_like[0]
+                else:
+                    tensor_like = np.asarray(tensor_like)
+                    if tensor_like.ndim == 4:
+                        tensor_like = tensor_like[0, 0]
+                    elif tensor_like.ndim == 3:
+                        tensor_like = tensor_like[0] if tensor_like.shape[0] != 1 else tensor_like[0]
+                return np.asarray(tensor_like)
+
             for vi in range(n_vis):
-                gt_vis = _squeeze_spatial_map(depth_gt[vi]).cpu().numpy()
-                pred_vis = _squeeze_spatial_map(pred_metric[vi]).cpu().numpy()
-                mask_vis = _squeeze_spatial_map(valid_mask[vi]).cpu().numpy().astype(bool)
+                gt_vis = _vis_2d(depth_gt[vi])
+                pred_vis = _vis_2d(pred_metric[vi])
+                mask_vis = _vis_2d(valid_mask[vi]).astype(bool)
                 gt_valid = gt_vis[mask_vis]
                 pred_valid = pred_vis[mask_vis]
                 scale = np.median(gt_valid) / max(np.median(pred_valid), 1e-6) if pred_valid.size > 0 else 1.0
                 pred_vis = pred_vis * scale
 
                 def _norm(d, m):
-                    if d.ndim == 3 and d.shape[0] == 1:
-                        d = d[0]
-                    if m.ndim == 3 and m.shape[0] == 1:
-                        m = m[0]
                     v = d[m]
                     mx = np.abs(v).max() if v.size > 0 else 1.0
                     return d / max(mx, 1e-6)
@@ -883,6 +895,12 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
         pred_np = pred_metric.cpu().numpy()
         gt_np = depth_gt.cpu().numpy()
         mask_np = valid_mask.cpu().numpy().astype(bool)
+        if pred_np.ndim == 2:
+            pred_np = pred_np[None, ...]
+        if gt_np.ndim == 2:
+            gt_np = gt_np[None, ...]
+        if mask_np.ndim == 2:
+            mask_np = mask_np[None, ...]
         if pred_np.ndim == 4 and pred_np.shape[1] == 1:
             pred_np = pred_np[:, 0]
         if gt_np.ndim == 4 and gt_np.shape[1] == 1:
@@ -890,11 +908,39 @@ def validate(model, dataloader, criterion, device, global_step, writer, tag="val
         if mask_np.ndim == 4 and mask_np.shape[1] == 1:
             mask_np = mask_np[:, 0]
         for i in range(pred_np.shape[0]):
-            m = mask_np[i] & np.isfinite(pred_np[i]) & np.isfinite(gt_np[i]) & (gt_np[i] > 1.0)
+            p_map = np.asarray(pred_np[i])
+            g_map = np.asarray(gt_np[i])
+            m_map = np.asarray(mask_np[i])
+            # Collapse channel-first outputs (C,H,W) by taking the first channel
+            if p_map.ndim == 3:
+                if p_map.shape[0] == 1:
+                    p_map = p_map[0]
+                else:
+                    p_map = p_map[0]
+            else:
+                p_map = p_map.squeeze()
+
+            if g_map.ndim == 3:
+                if g_map.shape[0] == 1:
+                    g_map = g_map[0]
+                else:
+                    g_map = g_map[0]
+            else:
+                g_map = g_map.squeeze()
+
+            if m_map.ndim == 3:
+                if m_map.shape[0] == 1:
+                    m_map = m_map[0]
+                else:
+                    m_map = m_map[0]
+            else:
+                m_map = m_map.squeeze()
+            m_map = m_map.astype(bool)
+            m = m_map & np.isfinite(p_map) & np.isfinite(g_map) & (g_map > 1.0)
             if m.sum() < 10:
                 continue
-            p = pred_np[i][m]
-            g = gt_np[i][m]
+            p = p_map.reshape(-1)[m.reshape(-1)]
+            g = g_map.reshape(-1)[m.reshape(-1)]
             scale = np.median(g) / max(np.median(p), 1e-6)
             p = p * scale
             total_scale += float(scale)
