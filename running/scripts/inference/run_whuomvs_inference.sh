@@ -76,6 +76,52 @@ run_one_case() {
         --viz_max_frames ${VIZ_MAX_FRAMES} \
         $(if [[ "${ENABLE_VIZ}" -eq 1 ]]; then echo "--enable_viz"; fi)
     echo "[INFO $(date +"%Y-%m-%d %H:%M:%S")] Done: ${model_name} / ${area_name:-predict} / came${camera_id}"
+
+    # If Ada-MVS style outputs exist, produce unified per-camera depth PNGs
+    adamvs_output_path="${output_path}/adamvs_output"
+    if [[ -d "${adamvs_output_path}" ]]; then
+        python3 - <<PY
+from pathlib import Path
+import sys
+import cv2
+
+repo_root = Path("${PROJECT_ROOT}")
+sys.path.insert(0, str(repo_root))
+from running.training.datasets_adamvs.data_io import read_pfm
+from running.utils.viz_utils import depth_to_color
+
+adamvs_output = Path("${adamvs_output_path}")
+viz_root = Path("${output_path}")
+split_name = "${TRAIN_TEST_SPLIT}"
+model_name = "${model_name}"
+camera_ids = ["${CAMERA_IDS[0]}", "${CAMERA_IDS[1]}", "${CAMERA_IDS[2]}", "${CAMERA_IDS[3]}", "${CAMERA_IDS[4]}"]
+
+for cam_dir in sorted([p for p in adamvs_output.iterdir() if p.is_dir()], key=lambda p: p.name):
+    cam_id = cam_dir.name
+    if cam_id not in camera_ids:
+        continue
+    if split_name == "predict":
+        out_dir = viz_root / f"run_da3mvs_{model_name}_predict_came{cam_id}"
+    else:
+        out_dir = viz_root / f"run_da3mvs_{model_name}_test_came{cam_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pfm_files = sorted(cam_dir.glob("*_init.pfm"))
+    for pfm_path in pfm_files:
+        try:
+            depth, _ = read_pfm(str(pfm_path))
+        except Exception as exc:
+            print(f"[WARN] failed reading {pfm_path}: {exc}")
+            continue
+        if depth.ndim == 3:
+            depth = depth[..., 0]
+        depth_color = depth_to_color(depth)
+        out_png = out_dir / f"{pfm_path.stem.replace('_init', '')}_depth.png"
+        cv2.imwrite(str(out_png), depth_color)
+
+print(f"[INFO] depth visualizations saved to: {viz_root}")
+PY
+    fi
 }
 
 for MODEL_NAME in "${MODEL_NAMES[@]}"; do 

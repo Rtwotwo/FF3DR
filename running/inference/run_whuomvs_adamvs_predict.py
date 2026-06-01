@@ -407,19 +407,30 @@ def _predict_depth_test():
                 os.makedirs(output_folder, exist_ok=True)
 
             step = 0
+            # track per-camera counts so we keep up to --test_max_samples_per_camera
+            cam_counts = {}
             first_start_time = time.time()
             test_viz_limit = 20
             original_display = args.display
             max_samples_per_camera = args.test_max_samples_per_camera
 
             for batch_idx, sample in enumerate(TestImgLoader):
-                if max_samples_per_camera > 0 and step >= max_samples_per_camera:
-                    break
-                if step < test_viz_limit:
+                # assume DataLoader batch_size == 1 as model/test code expects
+                vid = sample["out_view"][0]
+                cur_count = cam_counts.get(vid, 0)
+                if max_samples_per_camera > 0 and cur_count >= max_samples_per_camera:
+                    # skip this sample for this camera if we've reached its quota
+                    continue
+
+                if cur_count < test_viz_limit:
                     args.display = original_display
                 else:
                     args.display = False
+
+                prev_step = step
                 step = _process_sample(model, sample, output_folder, step)
+                # increment per-camera count by number of processed samples
+                cam_counts[vid] = cam_counts.get(vid, 0) + (step - prev_step)
 
             args.display = original_display
 
