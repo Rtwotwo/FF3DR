@@ -4,11 +4,16 @@
 
 Currently, we render the PolyTech scene in UrbanScene3D and display its gsplt rendering effect as well as the depth prediction effect of Depthanything3. Subsequently, we will measure the PSNR, SSIM and LPILS indices after rendering to provide a reference for evaluating the performance of the feedforward 3D reconstruction model in regressing 3D representations using aerial images captured from a drone perspective.
 
-https://github.com/user-attachments/assets/6a492199-dad3-4d24-ac71-1cd50b3ce311 
-https://github.com/user-attachments/assets/45336410-d84a-4ee9-9c13-7d573949a794 
+https://github.com/user-attachments/assets/6a492199-dad3-4d24-ac71-1cd50b3ce311
+
+https://github.com/user-attachments/assets/45336410-d84a-4ee9-9c13-7d573949a794
+
 https://github.com/user-attachments/assets/2e924ce4-9138-46af-9a60-1433de512088
+
 https://github.com/user-attachments/assets/84ef0e96-fc51-419c-aef3-10113184370b
+
 https://github.com/user-attachments/assets/3c3de141-3354-47df-8c6a-297ddbfbbd80
+
 https://github.com/user-attachments/assets/f1aee625-c626-4989-8b96-a19ae786513b
 
 ## 🌍 Dataset 🌍
