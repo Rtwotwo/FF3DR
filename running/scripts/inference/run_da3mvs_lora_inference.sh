@@ -7,10 +7,10 @@
 #   AREAS              : area list for test split (e.g. "area2 area3")
 #   GPU_ID             : CUDA visible device id
 
-SPLIT="${SPLIT:-test}"
-DA3MVS_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/whu-omvs/train_da3mvs/da3_large_adamvs_fusion_0526/checkpoints/best.pt"
+SPLIT="${SPLIT:-predict}"
+DA3MVS_CHECKPOINT="/data2/dataset/Redal/work_feedforward_3drepo/exp/whu-omvs/train_da3mvs_lora/da3_large_adamvs_lora_fusion_0528/checkpoints/best.pt"
 AREAS="${AREAS:-area2 area3}"
-GPU_ID="${GPU_ID:-5}"
+GPU_ID="${GPU_ID:-2}"
 
 VIEW_NUM=5
 BATCH_SIZE=8
@@ -38,10 +38,10 @@ fi
 
 if [[ "${SPLIT}" == "test" ]]; then
 	DATASET_PATH="${PROJECT_ROOT}/dataset/WHU-OMVS/test"
-	OUTPUT_FOLDER="${PROJECT_ROOT}/exp/whu-omvs/metric_da3mvs_whuomvs_test/"
+	OUTPUT_FOLDER="${PROJECT_ROOT}/exp/whu-omvs/metric_da3mvs_lora_whuomvs_test/"
 else
 	DATASET_PATH="${PROJECT_ROOT}/dataset/WHU-OMVS/predict"
-	OUTPUT_FOLDER="${PROJECT_ROOT}/exp/whu-omvs/metric_da3mvs_whuomvs_predict/"
+	OUTPUT_FOLDER="${PROJECT_ROOT}/exp/whu-omvs/metric_da3mvs_lora_whuomvs_predict/"
 fi
 
 echo "============================================"
@@ -50,6 +50,7 @@ echo "============================================"
 echo "  Split:            ${SPLIT}"
 echo "  Areas:            ${AREAS:-auto}"
 echo "  Model:            da3mvs"
+echo "  Recipe:           run_train_da3mvs_lora_whuomvs.py"
 echo "  DA3MVS checkpoint:${DA3MVS_CHECKPOINT}"
 echo "  Dataset:          ${DATASET_PATH}"
 echo "  Output:           ${OUTPUT_FOLDER}"

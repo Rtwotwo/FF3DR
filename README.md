@@ -1,14 +1,16 @@
 # :rocket: Project Guide :rocket:
 
-## 🔨 Installation 🔨
-
 ## 🎉️ Visualization 🎉️
 
 Currently, we render the PolyTech scene in UrbanScene3D and display its gsplt rendering effect as well as the depth prediction effect of Depthanything3. Subsequently, we will measure the PSNR, SSIM and LPILS indices after rendering to provide a reference for evaluating the performance of the feedforward 3D reconstruction model in regressing 3D representations using aerial images captured from a drone perspective.
 
-https://github.com/user-attachments/assets/79341fd6-1d51-47e1-a0f5-f9a08c4b15be
-
-https://github.com/user-attachments/assets/6d9101b6-5e3c-4160-bde2-3a2fae524149
+| PolyTech | School |
+|------|------|
+| https://github.com/user-attachments/assets/6a492199-dad3-4d24-ac71-1cd50b3ce311 | https://github.com/user-attachments/assets/45336410-d84a-4ee9-9c13-7d573949a794 |
+| Town | ArtSci |
+| https://github.com/user-attachments/assets/2e924ce4-9138-46af-9a60-1433de512088 | https://github.com/user-attachments/assets/84ef0e96-fc51-419c-aef3-10113184370b |
+| Bridge | Castle |
+| https://github.com/user-attachments/assets/3c3de141-3354-47df-8c6a-297ddbfbbd80 | https://github.com/user-attachments/assets/f1aee625-c626-4989-8b96-a19ae786513b |
 
 ## 🌍 Dataset 🌍
 
@@ -41,4 +43,6 @@ The simulated cameras were arranged following a typical oblique five-view camera
 </div>
 
 ## ❤️ Thanks ❤️
+
+This project relies on outstanding open-source projects including [DepthAnything3](https://github.com/ByteDance-Seed/Depth-Anything-3), [VGGT-Long](https://github.com/DengKaiCQ/VGGT-Long) and [Ada-MVS](https://github.com/gpcv-liujin/Ada-MVS). We appreciate the work done by the authors of the aforementioned open-source projects.
 
