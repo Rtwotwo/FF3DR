@@ -4,17 +4,34 @@
 
 Currently, we render the PolyTech scene in UrbanScene3D and display its gsplt rendering effect as well as the depth prediction effect of Depthanything3. Subsequently, we will measure the PSNR, SSIM and LPILS indices after rendering to provide a reference for evaluating the performance of the feedforward 3D reconstruction model in regressing 3D representations using aerial images captured from a drone perspective.
 
-https://github.com/user-attachments/assets/6a492199-dad3-4d24-ac71-1cd50b3ce311
+|        ArtSci         |        Bridge         |        Castle         |
+| :-------------------: | :-------------------: | :-------------------: |
+| ![ArtSci](assets/demo/ArtSci.gif) | ![Bridge](assets/demo/Bridge.gif) | ![Castle](assets/demo/Castle.gif) |
 
-https://github.com/user-attachments/assets/45336410-d84a-4ee9-9c13-7d573949a794
+|       PolyTech        |        School         |         Town          |
+| :-------------------: | :-------------------: | :-------------------: |
+| ![PolyTech](assets/demo/PolyTech.gif) | ![School](assets/demo/School.gif) | ![Town](assets/demo/Town.gif) |
 
-https://github.com/user-attachments/assets/2e924ce4-9138-46af-9a60-1433de512088
+## :gear: Running :gear:
 
-https://github.com/user-attachments/assets/84ef0e96-fc51-419c-aef3-10113184370b
+This FF3DR experiment mainly conducted tests on public datasets WHU-OMVS, MatrixCity and UrbanScene3D. An optimization scheme for the depth estimation model based on the feed-forward paradigm was designed and implemented. Taking Depth Anything3 (DA3) as the basic depth network, aiming at the reconstruction shortcomings in complex UAV aerial survey scenarios, the parameter-efficient fine-tuning strategy of Low-Rank Adaptation (LoRA) was introduced to complete domain adaptation optimization while keeping the backbone model unchanged. The specific relevant code is shown as follows:
 
-https://github.com/user-attachments/assets/3c3de141-3354-47df-8c6a-297ddbfbbd80
+First, we conduct LoRA fine-tuning training based on the DepthAnything3 model. The relevant code is located at [run_train_da3_lora_whuomvs.py](running/training/run_train_adamvs_whuomvs.py), with the corresponding startup script [run_train_da3_lora_whuomvs.sh](running/scripts/training/run_train_da3_lora_whuomvs.sh). You can start the training directly by following the instructions below.
 
-https://github.com/user-attachments/assets/f1aee625-c626-4989-8b96-a19ae786513b
+Secondly, the experimental code for feature-level fusion training of the DA3 model and traditional aviation models is [run_train_da3mvs_lora_whuomvs.py](running/training/run_train_da3mvs_lora_whuomvs.py), and the corresponding startup script is [run_train_da3mvs_lora_whuomvs.sh](running/scripts/training/run_train_da3mvs_lora_whuomvs.sh). However, it should be noted that this training model requires the model weights obtained from the aforementioned LoRA fine-tuning of DA3 for the second-stage training. Therefore, the weight path at line #24 in [run_train_da3mvs_lora_whuomvs.sh](running/scripts/training/run_train_da3mvs_lora_whuomvs.sh) can be modified to correctly map the LoRA fine-tuned weights.
+
+Thirdly, the training of traditional aerial 3D reconstruction algorithms is similar, implemented via [run_train_adamvs_whuomvs.sh](running/scripts/training/run_train_adamvs_whuomvs.sh). Note that the hyperparameters related to model training mentioned above, including training epochs, learning rate, scheduling strategy and other parameters, are all modified within the bash file.
+
+```bash 
+# Train the DA3 model with LoRA fine-tuning, dataset: WHU-OMVS
+bash running/scripts/training/run_train_da3_lora_whuomvs.sh
+
+#Joint training of LoRA DA3+Ada-MVS with feature fusion, dataset WHU-OMVS
+bash running/scripts/training/run_train_da3mvs_lora_whuomvs.sh
+
+# Train the Ada-MVS algorithm with the WHU-OMVS dataset
+bash running/scripts/training/run_train_adamvs_whuomvs.sh
+```
 
 ## 🌍 Dataset 🌍
 
@@ -45,6 +62,10 @@ The simulated cameras were arranged following a typical oblique five-view camera
   <img src="assets/matrixcity_map.jpg" alt="dataset_map">
   <img src="assets/matrixcity_aera.jpg" alt="dataset_map">
 </div>
+
+### UrbanScene3D Dataset
+
+[UrbanScene3D](https://vcc.tech/UrbanScene3D) dataset is equipped with a 63GB simulator featuring a physics engine and a lighting system. It can not only generate diverse data but also simulate vehicles and unmanned aerial vehicles (UAVs) in simulated urban environments to support subsequent relevant research. The dataset covers 16 abundant scenarios with a total area of 136 square kilometers, including real large urban areas such as Suzhou, New York, Shanghai, San Francisco, Shenzhen and Chicago, as well as virtual scenes like campuses, residential districts, squares, hospitals, schools, towns, bridges and castles. Comprehensive benchmarks covering both virtual and real scenes have also been established. These benchmarks can be utilized to design and evaluate aerial route planning and 3D reconstruction algorithms, and compare the performance of different planning methods.
 
 ## ❤️ Thanks ❤️
 
