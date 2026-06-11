@@ -36,7 +36,7 @@ Currently, we render the PolyTech scene in UrbanScene3D and display its gsplt re
 
 |       PolyTech NVS1        |        PolyTech NVS2         |
 | :-------------------: | :-------------------: |
-| ![PolyTech](assets/demo/viz_poly1.gif) | ![PolyTech](aassets/demo/viz_poly2.gif) |
+| ![PolyTech NVS1](assets/demo/viz_poly1.gif) | ![PolyTech NVS2](assets/demo/viz_poly2.gif) |
 
 ## :gear: Running :gear:
 
