@@ -30,6 +30,7 @@ Currently, we render the PolyTech scene in UrbanScene3D and display its gsplt re
 |        ArtSci         |        Bridge         |        Castle         |
 | :-------------------: | :-------------------: | :-------------------: |
 | ![ArtSci](assets/demo/ArtSci.gif) | ![Bridge](assets/demo/Bridge.gif) | ![Castle](assets/demo/Castle.gif) |
+
 |       PolyTech        |        School         |         Town          |
 | :-------------------: | :-------------------: | :-------------------: |
 | ![PolyTech](assets/demo/PolyTech.gif) | ![School](assets/demo/School.gif) | ![Town](assets/demo/Town.gif) |
