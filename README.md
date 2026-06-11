@@ -6,13 +6,22 @@ For complex aerial photography scenarios of drones, LoRA is adopted to conduct d
 
 The project experiment mainly conducts research on the WHU-OMVS dataset. We present the performance metrics and qualitative results of the LoRA-fine-tuned DA3 model, alongside the baseline models Ada-MVS for traditional aerial photogrammetry and the original DA3 model. The adopted metrics principally consist of absolute relative error, squared relative error, root mean square error, log root mean square error, log10 error, scale-invariant log error, threshold accuracy (1.25×), threshold accuracy (1.25²×), and threshold accuracy (1.25³×). The relevant test metrics and visualizations of depth information predicted by the models are displayed as follows.
 
-![whu-test-metrics](assets/depth/whu-test-metrics.png)
-![whu-test-viz](assets/depth/whu-test-viz.png)
+<div align="center">
+<img src="assets/depth/whu-test-metrics.png" alt="whu-test-metrics">
+</div>
+
+<div align="center">
+<img src="assets/depth/whu-test-viz.png" alt="whu-test-viz">
+</div>
 
 The traditional Ada-MVS relies on the classic MVS architecture and achieves the highest accuracy on homogeneous domain data with extremely low values for all error metrics. Compared with the original DA3, the model fine-tuned via LoRA delivers comprehensive performance improvements. Notably, the squared relative error (SqRel) metric drops substantially, which effectively suppresses depth outliers. The reconstruction accuracy for building edges and weakly textured areas is greatly enhanced, and the depth prediction results show a higher degree of alignment with ground truth labels.
 
-![whu-predict-metrics](assets/depth/whu-predict-metrics.png)
-![whu-predict-viz](assets/depth/whu-predict-viz.png)
+<div align="center">
+<img src="assets/depth/whu-predict-metrics.png" alt="whu-predict-metrics">
+</div>
+<div align="center">
+<img src="assets/depth/whu-predict-viz.png" alt="whu-predict-viz">
+</div>
 
 There is a notable disparity in the generalization ability of models on unseen Predict datasets that were not involved in training. The traditional Ada-MVS suffers a sharp performance drop with a steep surge in error metrics; its depth maps contain extensive noise, patches and structural damage, fully revealing its poor generalization capacity. The original DA3 maintains basic stability yet lacks sufficient capability for detail reconstruction. In contrast, the DA3 fine-tuned with LoRA proposed in this paper consistently retains low error levels, delivering clean and continuous depth maps free of obvious artifacts. It accurately reconstructs building outlines and topographic details, which verifies that this optimization scheme enables the model to learn universal geometric features of aerial survey scenarios and endows it with strong cross-domain robustness.
 
@@ -24,6 +33,7 @@ Currently, we render the PolyTech scene in UrbanScene3D and display its gsplt re
 |       PolyTech        |        School         |         Town          |
 | :-------------------: | :-------------------: | :-------------------: |
 | ![PolyTech](assets/demo/PolyTech.gif) | ![School](assets/demo/School.gif) | ![Town](assets/demo/Town.gif) |
+
 |       PolyTech NVS1        |        PolyTech NVS2         |
 | :-------------------: | :-------------------: |
 | ![PolyTech](assets/demo/viz_poly1.gif) | ![PolyTech](aassets/demo/viz_poly2.gif) |
